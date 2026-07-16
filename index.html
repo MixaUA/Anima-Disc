@@ -468,6 +468,7 @@ function setDiscTheme(theme) {
   scanHistory = [];
   resetTracking();
   lastTriangle = null;
+  resetAnchorSmoothing();
   targetRingProgress = 0;
   ringProgress = 0;
 }
@@ -528,6 +529,22 @@ function handleTrackingMiss() {
 }
 
 let lastTriangle = null;
+let smoothedAnchors = null; // { bottom, top, left, right } — для плавного малювання рамки
+const ANCHOR_SMOOTHING = 0.25; // частка нового кадру в суміші (0..1, менше = плавніше)
+
+function resetAnchorSmoothing() { smoothedAnchors = null; }
+
+/* змішує нову сиру точку зі попередньою згладженою (lerp), щоб пунктирна
+   рамка не сіпалась від кадру до кадру через дрібне тремтіння камери —
+   суто візуальне, на розшифровку не впливає (та рахується з сирих точок) */
+function smoothAnchorPoint(prevSmoothed, rawNext) {
+  if (!prevSmoothed) return { x: rawNext.x, y: rawNext.y };
+  return {
+    x: prevSmoothed.x + (rawNext.x - prevSmoothed.x) * ANCHOR_SMOOTHING,
+    y: prevSmoothed.y + (rawNext.y - prevSmoothed.y) * ANCHOR_SMOOTHING
+  };
+}
+
 let targetRingProgress = 0;
 let ringProgress = 0;
 const RING_EASE = 0.18;
@@ -631,6 +648,7 @@ async function startScan() {
     scanHistory = [];
     resetTracking();
     lastTriangle = null;
+    resetAnchorSmoothing();
     targetRingProgress = 0;
     ringProgress = 0;
     locking = false;
@@ -658,6 +676,7 @@ function teardownCamera() {
 
   resetTracking();
   lastTriangle = null;
+  resetAnchorSmoothing();
   targetRingProgress = 0;
   ringProgress = 0;
   locking = false;
@@ -789,6 +808,7 @@ function tryDecode() {
   if (markBlobs.length < 4) {
     handleTrackingMiss();
     lastTriangle = null;
+    resetAnchorSmoothing();
     setStatus(STR[CURRENT_LANG].statusSearchingAnchors);
     return;
   }
@@ -862,6 +882,7 @@ function tryDecode() {
   if (!bestQuad) {
     handleTrackingMiss();
     lastTriangle = null;
+    resetAnchorSmoothing();
     setStatus(sawOversized ? STR[CURRENT_LANG].statusTooClose : (sawOffCenter ? STR[CURRENT_LANG].statusOffCenter : STR[CURRENT_LANG].statusStabilizing));
     return;
   }
@@ -871,7 +892,17 @@ function tryDecode() {
   const cy = (bottomAnchor.y + topAnchor.y + leftAnchor.y + rightAnchor.y) / 4;
   handleTrackingHit(cx, cy);
 
-  lastTriangle = [bottomAnchor, rightAnchor, topAnchor, leftAnchor];
+  // рамку малюємо зі згладжених точок (плавніше на екрані), а гомографію
+  // й далі рахуємо із сирих bottomAnchor/topAnchor/leftAnchor/rightAnchor —
+  // на точність декодування згладжування жодним чином не впливає
+  const prevSmoothed = smoothedAnchors;
+  const smBottom = smoothAnchorPoint(prevSmoothed?.bottom, bottomAnchor);
+  const smTop    = smoothAnchorPoint(prevSmoothed?.top, topAnchor);
+  const smLeft   = smoothAnchorPoint(prevSmoothed?.left, leftAnchor);
+  const smRight  = smoothAnchorPoint(prevSmoothed?.right, rightAnchor);
+  smoothedAnchors = { bottom: smBottom, top: smTop, left: smLeft, right: smRight };
+
+  lastTriangle = [smBottom, smRight, smTop, smLeft];
 
   const transform = solveHomography(
     [SRC_BOTTOM, SRC_TOP, SRC_LEFT, SRC_RIGHT],
