@@ -812,7 +812,7 @@ function scanFrame() {
      реальний фон навколо диска яскраво-білий. Пікселі всередині кола
      (диск, якорі) лишаються незмінними. */
   analysisCtx.save();
-  analysisCtx.fillStyle = 'rgba(0, 0, 0, 0.88)';
+  analysisCtx.fillStyle = 'rgba(0, 0, 0, 1.0)'; // повністю чорний — найкращий контраст для Оцу
   analysisCtx.beginPath();
   analysisCtx.rect(0, 0, ANALYSIS_SIZE, ANALYSIS_SIZE);
   // Коло «вирізається» з маски завдяки правилу evenodd
