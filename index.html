@@ -498,6 +498,13 @@ const floodQueueY = new Int32Array(FLOOD_QUEUE_CAP);
 const MIN_TRIANGLE_SIDE_PX = 40;
 const MAX_TRIANGLE_SIDE_PX = 300;
 
+/* false (за замовчуванням) — старий режим: диск має лежати приблизно
+   "правильно" (низ приблизно внизу кадру, ±MAX_ROTATION_DEVIATION_DEG).
+   true — сканування з будь-якого боку/під будь-яким кутом повороту в
+   площині кадру; компенсується жорсткішим QUAD_SHAPE_TOLERANCE_STRICT
+   нижче в tryDecode, бо фільтр повороту тоді не діє. */
+const ALLOW_ANY_ORIENTATION = true;
+
 const EXPECTED_ROTATION_RAD = Math.PI / 2;
 const MAX_ROTATION_DEVIATION_DEG = 40;
 const MAX_ROTATION_DEVIATION_RAD = (MAX_ROTATION_DEVIATION_DEG * Math.PI) / 180;
@@ -797,10 +804,69 @@ function tryDecode() {
   const EXP_LONG_SIDE = ANCHOR_R * Math.sqrt(3);
   const EXP_SHORT_SIDE = ANCHOR_R;
   const QUAD_SHAPE_TOLERANCE = 0.35;
+  // жорсткіший поріг форми для режиму ANY_ORIENTATION — компенсує втрату
+  // фільтра повороту (MAX_ROTATION_DEVIATION_RAD у ньому не діє), щоб
+  // сумарна стійкість до шуму не просіла
+  const QUAD_SHAPE_TOLERANCE_STRICT = 0.22;
   // диск має бути в прицільній рамці по центру кадру — якщо центр знайденого
   // чотирикутника далеко від центру кадру, це, найімовірніше, випадкова
   // пляма збоку, а не справжній диск
   const MAX_CENTER_DEVIATION_PX = ANALYSIS_SIZE * 0.4;
+
+  /* стара логіка, без змін: "низ" — точка з макс. Y на екрані, "верх" —
+     з мін. Y, ліво/право — за x серед решти двох. Прив'язана до припущення,
+     що фізичний низ диска приблизно внизу кадру (звідси й потрібен окремий
+     фільтр MAX_ROTATION_DEVIATION_RAD нижче в основному циклі) */
+  function assignQuadRolesFixedOrientation(pts) {
+    let bottom = pts[0], top = pts[0];
+    for (const p of pts) {
+      if (p.y > bottom.y) bottom = p;
+      if (p.y < top.y) top = p;
+    }
+    if (bottom === top) return null;
+    const rest = pts.filter(p => p !== bottom && p !== top);
+    if (rest.length !== 2) return null;
+    const left = rest[0].x <= rest[1].x ? rest[0] : rest[1];
+    const right = rest[0].x <= rest[1].x ? rest[1] : rest[0];
+    return { bottom, top, left, right };
+  }
+
+  /* орієнтаційно-незалежна логіка: диск можна класти під будь-яким кутом.
+     Діагональ (bottom-top) завжди найдовша з 6 попарних відстаней між
+     4 точками (2R > R√3), тому визначається без прив'язки до екрана.
+     "top" — та з двох діагональних точок, що ближча сумарно до решти
+     двох (короткі сторони до left/right), "bottom" — навпаки.
+     "left"/"right" визначаються знаком векторного добутку відносно осі
+     bottom→top — це зберігає правильну відповідність фізичним якорям
+     диска (210°/330°) при будь-якому повороті, а не лише за екранним x,
+     який працює лише в межах вузького діапазону кутів. */
+  function assignQuadRolesAnyOrientation(pts) {
+    let bestPair = null, bestDist = -1;
+    for (let a = 0; a < 4; a++) {
+      for (let b = a + 1; b < 4; b++) {
+        const d = dist(pts[a], pts[b]);
+        if (d > bestDist) { bestDist = d; bestPair = [pts[a], pts[b]]; }
+      }
+    }
+    const [P, Q] = bestPair;
+    const rest = pts.filter(p => p !== P && p !== Q);
+    if (rest.length !== 2) return null;
+    const [R, S] = rest;
+
+    const sumP = dist(P, R) + dist(P, S);
+    const sumQ = dist(Q, R) + dist(Q, S);
+    const top = sumP <= sumQ ? P : Q;
+    const bottom = sumP <= sumQ ? Q : P;
+
+    const axisX = top.x - bottom.x, axisY = top.y - bottom.y;
+    function crossSign(pt) { return axisX * (pt.y - bottom.y) - axisY * (pt.x - bottom.x); }
+    const crossR = crossSign(R);
+    if (crossR === 0) return null; // вироджений випадок — точки на одній лінії
+    const left = crossR < 0 ? R : S;
+    const right = crossR < 0 ? S : R;
+
+    return { bottom, top, left, right };
+  }
 
   const candidates = markBlobs.slice(0, Math.min(12, markBlobs.length));
   let bestQuad = null, bestScore = Infinity;
@@ -813,16 +879,11 @@ function tryDecode() {
         for (let i3 = i2 + 1; i3 < candidates.length; i3++) {
           const pts = [candidates[i0], candidates[i1], candidates[i2], candidates[i3]];
 
-          let bottom = pts[0], top = pts[0];
-          for (const p of pts) {
-            if (p.y > bottom.y) bottom = p;
-            if (p.y < top.y) top = p;
-          }
-          if (bottom === top) continue;
-          const rest = pts.filter(p => p !== bottom && p !== top);
-          if (rest.length !== 2) continue;
-          const left = rest[0].x <= rest[1].x ? rest[0] : rest[1];
-          const right = rest[0].x <= rest[1].x ? rest[1] : rest[0];
+          const roles = ALLOW_ANY_ORIENTATION
+            ? assignQuadRolesAnyOrientation(pts)
+            : assignQuadRolesFixedOrientation(pts);
+          if (!roles) continue;
+          const { bottom, top, left, right } = roles;
 
           const cx4 = (bottom.x + top.x + left.x + right.x) / 4;
           const cy4 = (bottom.y + top.y + left.y + right.y) / 4;
@@ -846,11 +907,14 @@ function tryDecode() {
             relErr(dist(top, right), EXP_SHORT_SIDE),
           ];
           const maxErr = Math.max(...errs);
-          if (maxErr > QUAD_SHAPE_TOLERANCE) continue;
+          const shapeTolerance = ALLOW_ANY_ORIENTATION ? QUAD_SHAPE_TOLERANCE_STRICT : QUAD_SHAPE_TOLERANCE;
+          if (maxErr > shapeTolerance) continue;
 
-          const candRotation = Math.atan2(bottom.y - cy4, bottom.x - cx4);
-          const deviation = Math.abs(angleDiffRad(candRotation, EXPECTED_ROTATION_RAD));
-          if (deviation > MAX_ROTATION_DEVIATION_RAD) continue;
+          if (!ALLOW_ANY_ORIENTATION) {
+            const candRotation = Math.atan2(bottom.y - cy4, bottom.x - cx4);
+            const deviation = Math.abs(angleDiffRad(candRotation, EXPECTED_ROTATION_RAD));
+            if (deviation > MAX_ROTATION_DEVIATION_RAD) continue;
+          }
 
           const score = errs.reduce((a, b) => a + b, 0);
           if (score < bestScore) { bestScore = score; bestQuad = { bottom, top, left, right }; }
