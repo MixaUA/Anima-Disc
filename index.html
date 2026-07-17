@@ -883,7 +883,7 @@ function tryDecode() {
   // 88% (або яскравіший за 112%) від локального середнього.
   // Можна збільшити до 0.15 для більш агресивного виявлення
   // або зменшити до 0.08 для суворішого (менше хибних спрацьовувань).
-  const BRADLEY_T = 0.12;
+  const BRADLEY_T = 0.15;
 
   function isMarkAnchorBradley(x, y) {
     x = Math.round(x); y = Math.round(y);
@@ -967,7 +967,7 @@ function tryDecode() {
              еліпси навіть при помірному нахилі диска.
              aspect ≤ 1.5 (замість 1.7) — ще пропускає перспективний еліпс,
              але відфільтровує дуже витягнуті несиметричні плями. */
-          if (fillRatio >= 0.62 && aspect <= 1.5) {
+          if (fillRatio >= 0.5 && aspect <= 1.7) {
             markBlobs.push({ x: sx / cnt, y: sy / cnt, size: cnt });
           }
         }
