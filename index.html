@@ -289,6 +289,48 @@ video {
   0%, 49% { opacity: 1; }
   50%, 100% { opacity: 0; }
 }
+
+/* ===== ЛОГ ДЛЯ ДЕБАГУ ===== */
+
+.log-card {
+  width: min(460px, 92vw);
+  margin: 16px auto 0;
+  background: #0e4a78;
+  border: 2px solid #ffffff33;
+  border-radius: 8px;
+  padding: 14px;
+}
+.log-card label {
+  display: block;
+  font-size: 12px;
+  color: #aacbe8;
+  margin-bottom: 8px;
+}
+.log-card textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0b3d63;
+  color: #aacbe8;
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  border: 1px solid #ffffff33;
+  border-radius: 6px;
+  padding: 8px;
+  resize: vertical;
+}
+.log-card button {
+  background: #ffd479;
+  color: #0b3d63;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: bold;
+  cursor: pointer;
+  margin: 8px 6px 0 0;
+}
+.log-card button.secondary { background: #1a5b8f; color: #fff; }
 </style>
 </head>
 <body>
@@ -361,6 +403,13 @@ video {
 
 </div>
 
+<div class="log-card">
+  <label>Лог (для дебагу — скинь мені весь текст, коли щось піде не так)</label>
+  <textarea id="logArea" readonly rows="8"></textarea>
+  <button onclick="copyLog()">Копіювати</button>
+  <button class="secondary" onclick="clearLog()">Очистити</button>
+</div>
+
 <script>
 /* ================================================================
    МОВА ІНТЕРФЕЙСУ + АЛФАВІТ ДЕКОДУВАННЯ — той самий перемикач керує
@@ -389,7 +438,7 @@ const STR = {
     statusStabilizing: 'Стабілізація геометрії...',
     statusTooClose: 'Занадто близько — трохи відсунь',
     statusOffCenter: 'Тримай диск ближче до центру кадру',
-    statusRawNoise: 'Сирий шум, шукаю патерн...',
+    statusRawNoise: (m, inv) => `Сирий шум (${m}/114${inv ? `, невалідних кілець: ${inv}` : ''})`,
     statusHubUnconfirmed: 'Геометрія не підтверджена, шукаю...',
     statusCandidate: (cur, total) => `Кандидат (${cur}/${total})`,
     statusCameraError: (msg) => `Помилка камери: ${msg}`,
@@ -401,7 +450,7 @@ const STR = {
     statusStabilizing: 'Stabilizing geometry...',
     statusTooClose: 'Too close — move back a bit',
     statusOffCenter: 'Keep the disc closer to the center of the frame',
-    statusRawNoise: 'Raw noise, seeking pattern...',
+    statusRawNoise: (m, inv) => `Raw noise (${m}/114${inv ? `, invalid rings: ${inv}` : ''})`,
     statusHubUnconfirmed: 'Geometry not confirmed, searching...',
     statusCandidate: (cur, total) => `Candidate (${cur}/${total})`,
     statusCameraError: (msg) => `Camera error: ${msg}`,
@@ -642,6 +691,7 @@ async function startScan() {
     ringProgress = 0;
     locking = false;
     document.getElementById('centerGuide').style.display = 'block';
+    logEvent(`сесія: старт, тема=${DISC_THEME}, будь-яка орієнтація=${ALLOW_ANY_ORIENTATION}, мова=${CURRENT_LANG}`);
     setStatus(STR[CURRENT_LANG].statusSearchingAnchors);
     scanTimer = setInterval(scanFrame, 220);
     if (overlayAnimFrame) cancelAnimationFrame(overlayAnimFrame);
@@ -679,11 +729,58 @@ function teardownCamera() {
 }
 
 function stopScan() {
+  logEvent('сесія: перервано вручну');
   teardownCamera();
 }
 
 function setStatus(text) {
-  document.getElementById('scanStatus').textContent = text;
+  const st = document.getElementById('scanStatus');
+  st.textContent = text;
+  logStatusChange(text);
+}
+
+/* ================================================================
+   ЛОГ ДЛЯ ДЕБАГУ
+   ================================================================ */
+const MAX_LOG_LINES = 600;
+let logLines = [];
+let lastLoggedStatus = null;
+
+function logTimestamp() {
+  const d = new Date();
+  return d.toTimeString().split(' ')[0] + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
+function logEvent(msg) {
+  logLines.push(`[${logTimestamp()}] ${msg}`);
+  if (logLines.length > MAX_LOG_LINES) logLines.shift();
+  renderLog();
+}
+function logStatusChange(text) {
+  if (text === lastLoggedStatus) return; // не дублюємо однаковий статус щокадру
+  lastLoggedStatus = text;
+  logEvent('статус: ' + text);
+}
+function renderLog() {
+  const area = document.getElementById('logArea');
+  if (!area) return;
+  area.value = logLines.join('\n');
+  area.scrollTop = area.scrollHeight;
+}
+async function copyLog() {
+  const text = logLines.join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    const area = document.getElementById('logArea');
+    area.focus();
+    area.select();
+    try { document.execCommand('copy'); } catch (e2) {}
+  }
+}
+function clearLog() {
+  logLines = [];
+  lastLoggedStatus = null;
+  renderLog();
 }
 
 function scanFrame() {
@@ -1051,11 +1148,14 @@ function registerReading(text, mismatches, invalidRings) {
   if (locking) return;
 
   if (mismatches > NOISE_MISMATCH_THRESHOLD || invalidRings > 0) {
+    logEvent(`read: ШУМ text="${text || '(порожньо)'}" mismatches=${mismatches} invalid=${invalidRings} (поріг ${NOISE_MISMATCH_THRESHOLD})`);
     scanHistory = [];
     targetRingProgress = 0;
-    setStatus(STR[CURRENT_LANG].statusRawNoise);
+    setStatus(STR[CURRENT_LANG].statusRawNoise(mismatches, invalidRings));
     return;
   }
+
+  logEvent(`read: "${text || '(порожньо)'}" mismatches=${mismatches}`);
 
   if (scanHistory.length && scanHistory[scanHistory.length - 1] === text) {
     scanHistory.push(text);
@@ -1077,6 +1177,7 @@ function registerReading(text, mismatches, invalidRings) {
    заглушки. Нічого нікуди не зберігається — наступне сканування
    просто перезапише це поле заново. */
 function finishScan(text) {
+  logEvent(`LOCK: "${text}"`);
   teardownCamera();
   revealMessage(text || '(порожньо)');
   document.getElementById('accordion').classList.remove('state-down');
