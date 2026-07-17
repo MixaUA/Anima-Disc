@@ -466,6 +466,7 @@ let DISC_THEME = 'light';
 function setDiscTheme(theme) {
   DISC_THEME = theme === 'dark' ? 'dark' : 'light';
   scanHistory = [];
+  missStreak = 0;
   resetTracking();
   lastTriangle = null;
   targetRingProgress = 0;
@@ -499,10 +500,6 @@ analysisCanvas.height = ANALYSIS_SIZE;
 const analysisCtx = analysisCanvas.getContext('2d', { willReadFrequently: true });
 
 const visitedBuf = new Uint8Array(ANALYSIS_SIZE * ANALYSIS_SIZE);
-/* Попередньо виділений буфер для Summed Area Table (інтегральне зображення)
-   для адаптивного порогу Бредлі — виділяємо один раз, щоб не смітити GC
-   при кожному кадрі (scanFrame викликається кожні 220 мс). */
-const satBuf = new Float32Array(ANALYSIS_SIZE * ANALYSIS_SIZE);
 const FLOOD_QUEUE_CAP = 4900;
 const floodQueueX = new Int32Array(FLOOD_QUEUE_CAP);
 const floodQueueY = new Int32Array(FLOOD_QUEUE_CAP);
@@ -511,62 +508,65 @@ const MIN_TRIANGLE_SIDE_PX = 40;
 const MAX_TRIANGLE_SIDE_PX = 300;
 
 /* ----------------------------------------------------------------
-   ОТСУ-ПОРІГ ДЛЯ ЯКОРІВ, ОБМЕЖЕНИЙ КОЛОМ ПРИЦІЛУ.
+   ЛОКАЛЬНИЙ АДАПТИВНИЙ ПОРІГ — тільки для пошуку якорів (flood fill
+   нижче). Замість одного порогу на весь кадр (Оцу), кожна точка
+   порівнюється із середньою яскравістю СВОГО найближчого оточення
+   (вікно ADAPTIVE_WINDOW_RADIUS_PX*2+1 пікселів). Це стійкіше до
+   нерівномірного освітлення (тінь на частині диска, градієнт світла),
+   бо поріг "пливе" по кадру разом зі зміною фону, а не порівнюється
+   з рештою кадру.
 
-   Раніше тут був локальний адаптивний поріг (порівняння з середньою
-   яскравістю у вузькому вікні навколо кожного пікселя) — його
-   прибрано, бо він вимагав АБСОЛЮТНОЇ різниці яскравості мітка/фон.
-   На світлому кадрі (білий аркуш, екран) автоекспозиція камери
-   стискає контраст, і ця абсолютна різниця падає нижче порогу навіть
-   при чіткому чорнилі — пошук якорів ламався першим, ще до того, як
-   справа доходила до самого сканування.
+   Розмір вікна — підбирається дослідно, і це чесний компроміс:
+   - завелике вікно → фактично повертаємось до глобального порогу;
+   - замале вікно → сама мітка потрапляє у своє ж вікно усереднення,
+     і локальне середнє "з'їдає" контраст мітки саму із собою.
+   Значення нижче — стартова точка, може знадобитись підбір разом
+   із реальними тестами.
 
-   Отсу натомість шукає ВІДНОСНИЙ розрив у гістограмі — межу між двома
-   "хмарами" значень (папір і чорнило), а не абсолютну відстань від
-   локального середнього. Навіть коли обидві хмари стиснуті ближче
-   одна до одної автоекспозицією, розрив між ними здебільшого лишається
-   знаходимим, доки чорнило й папір не злилися в одну хмару повністю.
+   Зчитування бітів кілець (sampleAt/isMark нижче) цю функцію НЕ
+   використовує — там усе ще глобальний Оцу-поріг з окремою локальною
+   калібровкою по двох точках (fgLum/bgLum). Це окрема задача. */
+const ADAPTIVE_WINDOW_RADIUS_PX = 15; // половина сторони вікна (вікно ~31x31 px)
+const ADAPTIVE_THRESHOLD_OFFSET = 8; // мінімальна різниця від локального фону, щоб рахуватись міткою
 
-   Рахуємо Отсу ЛИШЕ в межах кола прицілу (GUIDE_SEARCH_RADIUS_PX), а
-   не по всьому кадру 340×340, як THRESH нижче (для читання кілець) —
-   саме в цьому колі й відбувається пошук якорів, тож пікселі поза ним
-   лише розмивають гістограму даремно й не додають корисного сигналу. */
-function computeCircleOtsu(data, W, H, cx, cy, radius) {
-  const hist = new Uint32Array(256);
-  let sampleCount = 0;
-  const r2 = radius * radius;
-  const step = 2; // крок вибірки — досить густо для стабільної гістограми, але швидко
-  const y0 = Math.max(0, Math.round(cy - radius));
-  const y1 = Math.min(H, Math.round(cy + radius));
-  const x0 = Math.max(0, Math.round(cx - radius));
-  const x1 = Math.min(W, Math.round(cx + radius));
-  for (let y = y0; y < y1; y += step) {
-    const dy = y - cy;
-    for (let x = x0; x < x1; x += step) {
-      const dx = x - cx;
-      if (dx * dx + dy * dy > r2) continue;
-      const i = (y * W + x) * 4;
+// перевикористовуваний буфер для integral image — виділяється один раз,
+// а не на кожен виклик tryDecode (~4-5 разів/сек), щоб не навантажувати
+// збирач сміття постійними виділеннями ~930 КБ пам'яті. Int32Array замість
+// Float64Array: яскравість ціла (0-255), сума в межах кадру 340x340 не
+// перевищує ~29 млн — чудово влазить у 32-бітне ціле, і вдвічі менше пам'яті
+const luminanceIntegralBuf = new Int32Array((ANALYSIS_SIZE + 1) * (ANALYSIS_SIZE + 1));
+
+function buildLuminanceIntegral(data, W, H, out) {
+  const stride = W + 1;
+  out.fill(0, 0, stride); // перший рядок (y=0) лишається нулями
+  for (let y = 0; y < H; y++) {
+    let rowSum = 0;
+    const rowBase = y * W;
+    const outRow = (y + 1) * stride;
+    const outPrevRow = y * stride;
+    out[outRow] = 0; // перший стовпець (x=0) лишається нулем
+    for (let x = 0; x < W; x++) {
+      const i = (rowBase + x) * 4;
       const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-      hist[Math.min(255, Math.max(0, Math.round(l)))]++;
-      sampleCount++;
+      rowSum += l;
+      out[outRow + x + 1] = out[outPrevRow + x + 1] + rowSum;
     }
   }
-  if (sampleCount === 0) return 128;
-  let sumAll = 0;
-  for (let t = 0; t < 256; t++) sumAll += t * hist[t];
-  let sumB = 0, wB = 0, maxVar = 0, thresh = 128;
-  for (let t = 0; t < 256; t++) {
-    wB += hist[t];
-    if (wB === 0) continue;
-    const wF = sampleCount - wB;
-    if (wF === 0) break;
-    sumB += t * hist[t];
-    const mB = sumB / wB;
-    const mF = (sumAll - sumB) / wF;
-    const varBetween = wB * wF * (mB - mF) * (mB - mF);
-    if (varBetween > maxVar) { maxVar = varBetween; thresh = t; }
-  }
-  return thresh;
+  return out;
+}
+
+function integralLocalMean(integral, W, H, cx, cy, radius) {
+  const stride = W + 1;
+  const x0 = Math.max(0, cx - radius);
+  const x1 = Math.min(W - 1, cx + radius);
+  const y0 = Math.max(0, cy - radius);
+  const y1 = Math.min(H - 1, cy + radius);
+  const sum = integral[(y1 + 1) * stride + (x1 + 1)]
+            - integral[y0 * stride + (x1 + 1)]
+            - integral[(y1 + 1) * stride + x0]
+            + integral[y0 * stride + x0];
+  const count = (x1 - x0 + 1) * (y1 - y0 + 1);
+  return sum / count;
 }
 
 /* false (за замовчуванням) — старий режим: диск має лежати приблизно
@@ -613,51 +613,49 @@ const ANCHOR_DOT_RADIUS_PX = 6;
 const TRIANGLE_DASH = [6, 6];
 let overlayAnimFrame = null;
 
-const CONFIRM_STREAK = 3;
+/* CONFIRM_STREAK — скільки разів (не обов'язково підряд без жодного
+   винятку, див. SCAN_WINDOW_SIZE нижче) має повторитись один і той
+   самий розшифрований текст, щоб вважати його підтвердженим.
+   Було 3 — довше, але й трохи надійніше проти випадкового шуму;
+   2 — швидше підтвердження, і в парі зі "плаваючим вікном" нижче
+   один випадковий кадр-відхилення вже не скидає весь прогрes на нуль. */
+const CONFIRM_STREAK = 2;
+
+/* Замість вимоги N кадрів ПОСПІЛЬ без жодного відхилення, дивимось на
+   останні SCAN_WINDOW_SIZE прочитаних текстів і рахуємо, який варіант
+   серед них зустрічається найчастіше. Підтверджуємо, коли найчастіший
+   варіант зустрівся CONFIRM_STREAK разів у цьому вікні. Це і є
+   толерантність до одиничного "кривого" кадру: один інший символ через
+   граничний контраст більше не обнуляє прогрес до нуля. */
+const SCAN_WINDOW_SIZE = 4;
+
+/* Толерантність до збоїв пошуку геометрії/якорів (замало плям, форма не
+   зійшлась, хаб не підтвердився, забагато шумних невідповідностей біт).
+   Один невдалий кадр більше не скидає прогрес одразу — лічильник missStreak
+   росте, і лише після MISS_TOLERANCE невдач ПОСПІЛЬ прогрес обнуляється.
+   Успішний кадр одразу скидає лічильник до нуля. */
+const MISS_TOLERANCE = 3;
+let missStreak = 0;
+
 const LOCK_HOLD_MS = 550;
 const NOISE_MISMATCH_THRESHOLD = 28; // ~25% від загальної кількості дзеркальних пар (114 при 19 символах)
-
-/* скільки символів можуть відрізнятися між двома прочитаннями, щоб вони
-   все одно рахувались "тим самим" диском, а не скидали прогрес до нуля.
-   На папері один кадр з випадковим відблиском може дати 1-2 неправильні
-   символи навіть коли диск лежить нерухомо — раніше це прирівнювалось
-   до "інший диск" і обнуляло весь streak. Тепер такий кадр просто
-   приєднується до кластера, а не ламає його */
-const READING_MISMATCH_TOLERANCE = 2;
-
-const HISTORY_CAP = 6; // не даємо scanHistory рости необмежено, поки триває збіг
 
 let scanHistory = [];
 let locking = false;
 let camStream = null, scanTimer = null;
 let lockHoldTimeoutId = null;
 
+/* Реєструє один невдалий кадр (геометрія/якорі/шум) — не скидає прогрес
+   одразу, лише після MISS_TOLERANCE невдач поспіль. */
+function registerMiss() {
+  missStreak++;
+  if (missStreak > MISS_TOLERANCE) {
+    scanHistory = [];
+    targetRingProgress = 0;
+  }
+}
+
 function dist(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2); }
-
-/* кількість позицій, де два прочитаних рядки відрізняються (з урахуванням
-   різної довжини — обрив на іншому END_INDEX теж рахується різницею) */
-function textDiffCount(a, b) {
-  let diff = Math.abs(a.length - b.length);
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    if (a[i] !== b[i]) diff++;
-  }
-  return diff;
-}
-
-/* найчастіший варіант серед накопичених кадрів кластера — фінальний
-   результат бере не обов'язково останній кадр, а "медіану" по кластеру,
-   що додатково гасить одиничний шум перед тим, як показати текст */
-function mostCommonReading(arr) {
-  const counts = new Map();
-  let best = arr[0], bestCount = 0;
-  for (const t of arr) {
-    const c = (counts.get(t) || 0) + 1;
-    counts.set(t, c);
-    if (c > bestCount) { bestCount = c; best = t; }
-  }
-  return best;
-}
 
 function solveLinearSystem(A, b) {
   const n = b.length;
@@ -742,6 +740,7 @@ async function startScan() {
     });
     video.srcObject = camStream;
     scanHistory = [];
+    missStreak = 0;
     resetTracking();
     lastTriangle = null;
     targetRingProgress = 0;
@@ -775,8 +774,7 @@ function teardownCamera() {
   ringProgress = 0;
   locking = false;
   scanHistory = [];
-
-  const dc = document.getElementById('decCanvas');
+  missStreak = 0;
   dc.getContext('2d').clearRect(0, 0, dc.width, dc.height);
   const sc = document.getElementById('sampleCanvas');
   sc.getContext('2d').clearRect(0, 0, sc.width, sc.height);
@@ -804,21 +802,6 @@ function scanFrame() {
   } else {
     analysisCtx.drawImage(video, 0, 0, ANALYSIS_SIZE, ANALYSIS_SIZE);
   }
-
-  /* Програмне затемнення фону: малюємо темну маску поверх аналітичного
-     буфера поза колом прицілу (GUIDE_SEARCH_RADIUS_PX) перед тим, як
-     читати пікселі. Це штучно забирає білий фон з гістограми і дає Оцу
-     (THRESH для читання кілець) чітку бімодальну гістограму навіть коли
-     реальний фон навколо диска яскраво-білий. Пікселі всередині кола
-     (диск, якорі) лишаються незмінними. */
-  analysisCtx.save();
-  analysisCtx.fillStyle = 'rgba(0, 0, 0, 0.88)';
-  analysisCtx.beginPath();
-  analysisCtx.rect(0, 0, ANALYSIS_SIZE, ANALYSIS_SIZE);
-  // Коло «вирізається» з маски завдяки правилу evenodd
-  analysisCtx.arc(ANALYSIS_SIZE / 2, ANALYSIS_SIZE / 2, GUIDE_SEARCH_RADIUS_PX, 0, Math.PI * 2, true);
-  analysisCtx.fill('evenodd');
-  analysisCtx.restore();
 
   tryDecode();
 }
@@ -869,57 +852,16 @@ function tryDecode() {
   // кадри до кінця сесії без жодного запобіжника — тому прибрано.
   function isMark(l) { return DISC_THEME === 'dark' ? l > THRESH : l < THRESH; }
 
-  /* Для пошуку якорів використовуємо адаптивний поріг Бредлі замість
-     глобального Оцу. Проблема Оцу: на яскравому/білому фоні автоекспозиція
-     камери стискає контраст і гістограма стає майже унімодальною —
-     Оцу не може знайти розрив між фоном і темними якорями диска.
-     Бредлі натомість порівнює кожен піксель з ЛОКАЛЬНИМ середнім у вікні
-     навколо нього: навіть якщо весь кадр вибілений, темний якір залишається
-     темним відносно свого найближчого оточення. */
-
-  // 1. Будуємо Summed Area Table (інтегральне зображення) по яскравості
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 4;
-      const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-      const above  = y > 0 ? satBuf[(y - 1) * W + x] : 0;
-      const left   = x > 0 ? satBuf[y * W + (x - 1)] : 0;
-      const corner = (x > 0 && y > 0) ? satBuf[(y - 1) * W + (x - 1)] : 0;
-      satBuf[y * W + x] = l + above + left - corner;
-    }
-  }
-
-  // 2. Параметри вікна та чутливість
-  // Вікно ~1/8 ширини кадру (≈42px) — достатньо велике, щоб охопити
-  // якір цілком і захопити трохи фону навколо нього для порівняння,
-  // але не занадто велике, щоб не розмивати локальний контраст.
-  const BRADLEY_HALF = Math.round(W / 8);
-  // T = 0.12: піксель вважається міткою якщо він темніший за
-  // 88% (або яскравіший за 112%) від локального середнього.
-  // Можна збільшити до 0.15 для більш агресивного виявлення
-  // або зменшити до 0.08 для суворішого (менше хибних спрацьовувань).
-  const BRADLEY_T = 0.15;
-
-  function isMarkAnchorBradley(x, y) {
-    x = Math.round(x); y = Math.round(y);
-    if (x < 0 || x >= W || y < 0 || y >= H) return false;
-    // Межі вікна (clamp до країв зображення)
-    const x1 = Math.max(0, x - BRADLEY_HALF);
-    const y1 = Math.max(0, y - BRADLEY_HALF);
-    const x2 = Math.min(W - 1, x + BRADLEY_HALF);
-    const y2 = Math.min(H - 1, y + BRADLEY_HALF);
-    const count = (x2 - x1 + 1) * (y2 - y1 + 1);
-    // Сума яскравостей у вікні за O(1) через SAT
-    const sum = satBuf[y2 * W + x2]
-      - (y1 > 0 ? satBuf[(y1 - 1) * W + x2] : 0)
-      - (x1 > 0 ? satBuf[y2 * W + (x1 - 1)] : 0)
-      + (x1 > 0 && y1 > 0 ? satBuf[(y1 - 1) * W + (x1 - 1)] : 0);
-    const localMean = sum / count;
-    const i = (y * W + x) * 4;
-    const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-    // Світлий диск — темні мітки темніші за локальне середнє на T
-    // Темний диск — світлі мітки яскравіші за локальне середнє на T
-    return DISC_THEME === 'dark' ? l > localMean * (1 + BRADLEY_T) : l < localMean * (1 - BRADLEY_T);
+  // локальний адаптивний поріг для пошуку якорів (див. коментар біля
+  // ADAPTIVE_WINDOW_RADIUS_PX вище) — рахується один раз на кадр
+  const luminanceIntegral = buildLuminanceIntegral(data, W, H, luminanceIntegralBuf);
+  function isMarkLocal(x, y) {
+    const ix = Math.round(x), iy = Math.round(y);
+    const l = lum(ix, iy);
+    const bg = integralLocalMean(luminanceIntegral, W, H, ix, iy, ADAPTIVE_WINDOW_RADIUS_PX);
+    return DISC_THEME === 'dark'
+      ? l > bg + ADAPTIVE_THRESHOLD_OFFSET
+      : l < bg - ADAPTIVE_THRESHOLD_OFFSET;
   }
 
   // пошук плям обмежено колом прицілу (#centerGuide, 68% кадру в CSS) з
@@ -947,7 +889,7 @@ function tryDecode() {
       // додатково відсікаємо кути прямокутника пошуку — приціл круглий,
       // а не квадратний, тож без цього кути все одно шукали б поза колом
       if (Math.hypot(x - W / 2, y - H / 2) > GUIDE_SEARCH_RADIUS_PX) continue;
-      if (isMarkAnchorBradley(x, y) && !visited[y * W + x]) {
+      if (isMarkLocal(x, y) && !visited[y * W + x]) {
         floodQueueX[0] = x; floodQueueY[0] = y;
         let qHead = 0, qTail = 1;
         let sx = 0, sy = 0, cnt = 0;
@@ -955,7 +897,7 @@ function tryDecode() {
         while (qHead < qTail && cnt < 1200) {
           const px = floodQueueX[qHead], py = floodQueueY[qHead];
           qHead++;
-          if (px < 0 || px >= W || py < 0 || py >= H || visited[py * W + px] || !isMarkAnchorBradley(px, py)) continue;
+          if (px < 0 || px >= W || py < 0 || py >= H || visited[py * W + px] || !isMarkLocal(px, py)) continue;
           visited[py * W + px] = 1;
           sx += px; sy += py; cnt++;
           if (px < minPX) minPX = px;
@@ -974,14 +916,6 @@ function tryDecode() {
           const bboxH = maxPY - minPY + 4;
           const fillRatio = (cnt * 16) / (bboxW * bboxH);
           const aspect = Math.max(bboxW, bboxH) / Math.min(bboxW, bboxH);
-          /* Якорі — кола. Ідеальне коло в bbox: fillRatio = π/4 ≈ 0.785.
-             Під перспективою коло → еліпс, fillRatio трохи падає, але
-             залишається значно вищим, ніж у дугоподібних фрагментів кілець
-             чи нерівних символьних плям, що дає чудовий фільтр.
-             0.62 — відсікає дуги й видовжені шматки, але ще пропускає
-             еліпси навіть при помірному нахилі диска.
-             aspect ≤ 1.5 (замість 1.7) — ще пропускає перспективний еліпс,
-             але відфільтровує дуже витягнуті несиметричні плями. */
           if (fillRatio >= 0.5 && aspect <= 1.7) {
             markBlobs.push({ x: sx / cnt, y: sy / cnt, size: cnt });
           }
@@ -991,25 +925,11 @@ function tryDecode() {
   }
 
   markBlobs.sort((a, b) => b.size - a.size);
-
-  /* ДІАГНОСТИКА (тимчасово): малюємо кожну знайдену пляму жовтим колом
-     просто на відео. Це дозволяє на власні очі побачити, що камера
-     сприймає як "потенційний якір" на реальному папері — замість того,
-     щоб я вгадував числа наосліп. Радіус кола залежить від розміру
-     плями (cnt), щоб відрізняти дрібний шум від великих міток. */
-  for (const b of markBlobs) {
-    const r = Math.max(3, Math.min(14, Math.sqrt(b.size)));
-    overlayCtx.strokeStyle = 'rgba(255, 230, 0, 0.85)';
-    overlayCtx.lineWidth = 1.5;
-    overlayCtx.beginPath();
-    overlayCtx.arc(b.x, b.y, r, 0, Math.PI * 2);
-    overlayCtx.stroke();
-  }
-
   if (markBlobs.length < 4) {
     handleTrackingMiss();
     lastTriangle = null;
-    setStatus(STR[CURRENT_LANG].statusSearchingAnchors + ` [плям: ${markBlobs.length}]`);
+    registerMiss();
+    setStatus(STR[CURRENT_LANG].statusSearchingAnchors);
     return;
   }
 
@@ -1017,13 +937,10 @@ function tryDecode() {
   const EXP_LONG_SIDE = ANCHOR_R * Math.sqrt(3);
   const EXP_SHORT_SIDE = ANCHOR_R;
   const QUAD_SHAPE_TOLERANCE = 0.35;
-  /* жорсткіший поріг форми для режиму ANY_ORIENTATION — компенсує втрату
-     фільтра повороту (MAX_ROTATION_DEVIATION_RAD у ньому не діє), щоб
-     сумарна стійкість до шуму не просіла.
-     Було 0.22 — залишено на 0.30, щоб дати трохи простору для шуму
-     форми на друкованому папері (нерівні краї міток), залишаючись
-     достатньо строгим, щоб не плутати випадкові плями з якорями */
-  const QUAD_SHAPE_TOLERANCE_STRICT = 0.30;
+  // жорсткіший поріг форми для режиму ANY_ORIENTATION — компенсує втрату
+  // фільтра повороту (MAX_ROTATION_DEVIATION_RAD у ньому не діє), щоб
+  // сумарна стійкість до шуму не просіла
+  const QUAD_SHAPE_TOLERANCE_STRICT = 0.22;
   // диск має бути в прицільній рамці по центру кадру — якщо центр знайденого
   // чотирикутника далеко від центру кадру, це, найімовірніше, випадкова
   // пляма збоку, а не справжній диск
@@ -1084,24 +1001,10 @@ function tryDecode() {
     return { bottom, top, left, right };
   }
 
-  /* було 12 — розширено до 18, бо на папері справжні якорі не завжди
-     є найбільшими 4 плямами (шум/текстура паперу теж дає плями), тож
-     їм потрібно більше шансів потрапити в пул перебору комбінацій */
-  const candidates = markBlobs.slice(0, Math.min(18, markBlobs.length));
+  const candidates = markBlobs.slice(0, Math.min(12, markBlobs.length));
   let bestQuad = null, bestScore = Infinity;
   let sawOversized = false;
   let sawOffCenter = false;
-  let closestShapeErr = Infinity; // ДІАГНОСТИКА: найкраща (мінімальна) похибка форми серед УСІХ спроб, навіть невдалих
-
-  // ДІАГНОСТИКА: кандидати, що беруть участь у переборі, виділяємо
-  // окремим кольором (блакитний), поверх жовтих кіл усіх плям
-  for (const c of candidates) {
-    overlayCtx.strokeStyle = 'rgba(80, 200, 255, 0.9)';
-    overlayCtx.lineWidth = 2;
-    overlayCtx.beginPath();
-    overlayCtx.arc(c.x, c.y, 4, 0, Math.PI * 2);
-    overlayCtx.stroke();
-  }
 
   for (let i0 = 0; i0 < candidates.length; i0++) {
     for (let i1 = i0 + 1; i1 < candidates.length; i1++) {
@@ -1137,10 +1040,6 @@ function tryDecode() {
             relErr(dist(top, right), EXP_SHORT_SIDE),
           ];
           const maxErr = Math.max(...errs);
-          // ДІАГНОСТИКА: запам'ятовуємо найкращу похибку форми навіть
-          // якщо ця конкретна комбінація не пройшла поріг — щоб бачити,
-          // наскільки далеко/близько ми були від успішного збігу
-          if (maxErr < closestShapeErr) closestShapeErr = maxErr;
           const shapeTolerance = ALLOW_ANY_ORIENTATION ? QUAD_SHAPE_TOLERANCE_STRICT : QUAD_SHAPE_TOLERANCE;
           if (maxErr > shapeTolerance) continue;
 
@@ -1160,12 +1059,8 @@ function tryDecode() {
   if (!bestQuad) {
     handleTrackingMiss();
     lastTriangle = null;
-    // ДІАГНОСТИКА: додаємо до звичайного статусу кількість знайдених плям
-    // і найкращу (мінімальну) похибку форми серед усіх спроб — потрібен
-    // поріг ≤30% (QUAD_SHAPE_TOLERANCE_STRICT), щоб комбінація пройшла
-    const shapeDiag = closestShapeErr === Infinity ? '—' : Math.round(closestShapeErr * 100) + '%';
-    const diag = ` [плям:${markBlobs.length} форма:${shapeDiag}]`;
-    setStatus((sawOversized ? STR[CURRENT_LANG].statusTooClose : (sawOffCenter ? STR[CURRENT_LANG].statusOffCenter : STR[CURRENT_LANG].statusStabilizing)) + diag);
+    registerMiss();
+    setStatus(sawOversized ? STR[CURRENT_LANG].statusTooClose : (sawOffCenter ? STR[CURRENT_LANG].statusOffCenter : STR[CURRENT_LANG].statusStabilizing));
     return;
   }
 
@@ -1190,8 +1085,7 @@ function tryDecode() {
   }
   if (!hubOk) {
     handleTrackingMiss();
-    scanHistory = [];
-    targetRingProgress = 0;
+    registerMiss();
     setStatus(STR[CURRENT_LANG].statusHubUnconfirmed);
     return;
   }
@@ -1259,50 +1153,39 @@ function tryDecode() {
   registerReading(text, totalMismatches, invalidRings);
 }
 
-/* ================================================================
-   ПІДТВЕРДЖЕННЯ РЕЗУЛЬТАТУ — толерантне до одиничного шуму.
-   Раніше вимагалось трьох ІДЕНТИЧНИХ рядків поспіль; на друкованому
-   папері один зашумлений кадр (відблиск, тремтіння руки) майже завжди
-   давав хоч одну відмінність і обнуляв весь прогрес — звідси відчуття
-   "найменший рух все скидає". Тепер: зашумлений кадр (мало не пройшов
-   NOISE_MISMATCH_THRESHOLD/invalidRings) просто ігнорується без скидання
-   прогресу, а "інший, але схожий" результат (до READING_MISMATCH_TOLERANCE
-   символів різниці) приєднується до того самого кластера замість того,
-   щоб почати його заново. Фінальний текст — найчастіший варіант у
-   кластері, а не обов'язково останній кадр.
-   ================================================================ */
 function registerReading(text, mismatches, invalidRings) {
   if (locking) return;
 
   if (mismatches > NOISE_MISMATCH_THRESHOLD || invalidRings > 0) {
-    // одиничний явно зашумлений кадр більше не скидає накопичений
-    // прогрес — просто пропускаємо його і чекаємо наступний
+    registerMiss();
     setStatus(STR[CURRENT_LANG].statusRawNoise);
     return;
   }
 
-  if (scanHistory.length === 0) {
-    scanHistory = [text];
-  } else {
-    const reference = scanHistory[scanHistory.length - 1];
-    const diff = textDiffCount(text, reference);
-    if (diff <= READING_MISMATCH_TOLERANCE) {
-      scanHistory.push(text);
-      if (scanHistory.length > HISTORY_CAP) scanHistory.shift();
-    } else {
-      // це вже справді інший результат (інший диск або сильний шум) —
-      // тільки тепер починаємо кластер заново
-      scanHistory = [text];
-    }
+  // повністю вдалий кадр (геометрія знайдена, хаб підтверджено, шуму
+  // в межах порогу) — скидаємо лічильник поспіль-невдач
+  missStreak = 0;
+
+  // плаваюче вікно останніх SCAN_WINDOW_SIZE прочитаних текстів: рахуємо
+  // найчастіший варіант, а не вимагаємо точного збігу з попереднім
+  // кадром — так один "кривий" кадр не обнуляє весь прогрес до нуля
+  scanHistory.push(text);
+  if (scanHistory.length > SCAN_WINDOW_SIZE) scanHistory.shift();
+
+  let bestText = text, bestCount = 0;
+  const counts = new Map();
+  for (const t of scanHistory) {
+    const c = (counts.get(t) || 0) + 1;
+    counts.set(t, c);
+    if (c > bestCount) { bestCount = c; bestText = t; }
   }
 
-  targetRingProgress = Math.min(scanHistory.length, CONFIRM_STREAK);
-  setStatus(STR[CURRENT_LANG].statusCandidate(scanHistory.length, CONFIRM_STREAK));
+  targetRingProgress = Math.min(bestCount, CONFIRM_STREAK);
+  setStatus(STR[CURRENT_LANG].statusCandidate(bestCount, CONFIRM_STREAK));
 
-  if (scanHistory.length >= CONFIRM_STREAK && !locking) {
+  if (bestCount >= CONFIRM_STREAK && !locking) {
     locking = true;
-    const finalText = mostCommonReading(scanHistory);
-    lockHoldTimeoutId = setTimeout(() => finishScan(finalText), LOCK_HOLD_MS);
+    lockHoldTimeoutId = setTimeout(() => finishScan(bestText), LOCK_HOLD_MS);
   }
 }
 
