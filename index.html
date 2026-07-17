@@ -526,25 +526,32 @@ const MAX_TRIANGLE_SIDE_PX = 300;
    використовує — там усе ще глобальний Оцу-поріг з окремою локальною
    калібровкою по двох точках (fgLum/bgLum). Це окрема задача. */
 const ADAPTIVE_WINDOW_RADIUS_PX = 15; // половина сторони вікна (вікно ~31x31 px)
-const ADAPTIVE_THRESHOLD_OFFSET = 12; // мінімальна різниця від локального фону, щоб рахуватись міткою
+const ADAPTIVE_THRESHOLD_OFFSET = 8; // мінімальна різниця від локального фону, щоб рахуватись міткою
 
-function buildLuminanceIntegral(data, W, H) {
-  // сумарна таблиця яскравості (integral image) — дозволяє рахувати
-  // середню яскравість будь-якого прямокутника за O(1) незалежно від
-  // розміру вікна, замість перебору пікселів вікна щоразу
-  const integral = new Float64Array((W + 1) * (H + 1));
+// перевикористовуваний буфер для integral image — виділяється один раз,
+// а не на кожен виклик tryDecode (~4-5 разів/сек), щоб не навантажувати
+// збирач сміття постійними виділеннями ~930 КБ пам'яті. Int32Array замість
+// Float64Array: яскравість ціла (0-255), сума в межах кадру 340x340 не
+// перевищує ~29 млн — чудово влазить у 32-бітне ціле, і вдвічі менше пам'яті
+const luminanceIntegralBuf = new Int32Array((ANALYSIS_SIZE + 1) * (ANALYSIS_SIZE + 1));
+
+function buildLuminanceIntegral(data, W, H, out) {
   const stride = W + 1;
+  out.fill(0, 0, stride); // перший рядок (y=0) лишається нулями
   for (let y = 0; y < H; y++) {
     let rowSum = 0;
     const rowBase = y * W;
+    const outRow = (y + 1) * stride;
+    const outPrevRow = y * stride;
+    out[outRow] = 0; // перший стовпець (x=0) лишається нулем
     for (let x = 0; x < W; x++) {
       const i = (rowBase + x) * 4;
       const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
       rowSum += l;
-      integral[(y + 1) * stride + (x + 1)] = integral[y * stride + (x + 1)] + rowSum;
+      out[outRow + x + 1] = out[outPrevRow + x + 1] + rowSum;
     }
   }
-  return integral;
+  return out;
 }
 
 function integralLocalMean(integral, W, H, cx, cy, radius) {
@@ -813,7 +820,7 @@ function tryDecode() {
 
   // локальний адаптивний поріг для пошуку якорів (див. коментар біля
   // ADAPTIVE_WINDOW_RADIUS_PX вище) — рахується один раз на кадр
-  const luminanceIntegral = buildLuminanceIntegral(data, W, H);
+  const luminanceIntegral = buildLuminanceIntegral(data, W, H, luminanceIntegralBuf);
   function isMarkLocal(x, y) {
     const ix = Math.round(x), iy = Math.round(y);
     const l = lum(ix, iy);
