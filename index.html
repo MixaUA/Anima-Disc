@@ -526,7 +526,12 @@ const MAX_TRIANGLE_SIDE_PX = 300;
    використовує — там усе ще глобальний Оцу-поріг з окремою локальною
    калібровкою по двох точках (fgLum/bgLum). Це окрема задача. */
 const ADAPTIVE_WINDOW_RADIUS_PX = 15; // половина сторони вікна (вікно ~31x31 px)
-const ADAPTIVE_THRESHOLD_OFFSET = 8; // мінімальна різниця від локального фону, щоб рахуватись міткою
+/* було 8 — на друкованому папері контраст чорнило/фон набагато менший,
+   ніж на екрані (не чисто чорний на чисто білому), і поріг у 8 просто
+   не пропускав більшість пікселів мітки, через що якір "не чіплявся".
+   4 — м'якший поріг, компенсовано жорсткішим QUAD_SHAPE_TOLERANCE_STRICT
+   нижче, щоб не почати ловити випадковий шум замість якорів */
+const ADAPTIVE_THRESHOLD_OFFSET = 4; // мінімальна різниця від локального фону, щоб рахуватись міткою
 
 // перевикористовуваний буфер для integral image — виділяється один раз,
 // а не на кожен виклик tryDecode (~4-5 разів/сек), щоб не навантажувати
@@ -616,12 +621,47 @@ const CONFIRM_STREAK = 3;
 const LOCK_HOLD_MS = 550;
 const NOISE_MISMATCH_THRESHOLD = 28; // ~25% від загальної кількості дзеркальних пар (114 при 19 символах)
 
+/* скільки символів можуть відрізнятися між двома прочитаннями, щоб вони
+   все одно рахувались "тим самим" диском, а не скидали прогрес до нуля.
+   На папері один кадр з випадковим відблиском може дати 1-2 неправильні
+   символи навіть коли диск лежить нерухомо — раніше це прирівнювалось
+   до "інший диск" і обнуляло весь streak. Тепер такий кадр просто
+   приєднується до кластера, а не ламає його */
+const READING_MISMATCH_TOLERANCE = 2;
+
+const HISTORY_CAP = 6; // не даємо scanHistory рости необмежено, поки триває збіг
+
 let scanHistory = [];
 let locking = false;
 let camStream = null, scanTimer = null;
 let lockHoldTimeoutId = null;
 
 function dist(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2); }
+
+/* кількість позицій, де два прочитаних рядки відрізняються (з урахуванням
+   різної довжини — обрив на іншому END_INDEX теж рахується різницею) */
+function textDiffCount(a, b) {
+  let diff = Math.abs(a.length - b.length);
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    if (a[i] !== b[i]) diff++;
+  }
+  return diff;
+}
+
+/* найчастіший варіант серед накопичених кадрів кластера — фінальний
+   результат бере не обов'язково останній кадр, а "медіану" по кластеру,
+   що додатково гасить одиничний шум перед тим, як показати текст */
+function mostCommonReading(arr) {
+  const counts = new Map();
+  let best = arr[0], bestCount = 0;
+  for (const t of arr) {
+    const c = (counts.get(t) || 0) + 1;
+    counts.set(t, c);
+    if (c > bestCount) { bestCount = c; best = t; }
+  }
+  return best;
+}
 
 function solveLinearSystem(A, b) {
   const n = b.length;
@@ -902,10 +942,15 @@ function tryDecode() {
   const EXP_LONG_SIDE = ANCHOR_R * Math.sqrt(3);
   const EXP_SHORT_SIDE = ANCHOR_R;
   const QUAD_SHAPE_TOLERANCE = 0.35;
-  // жорсткіший поріг форми для режиму ANY_ORIENTATION — компенсує втрату
-  // фільтра повороту (MAX_ROTATION_DEVIATION_RAD у ньому не діє), щоб
-  // сумарна стійкість до шуму не просіла
-  const QUAD_SHAPE_TOLERANCE_STRICT = 0.22;
+  /* жорсткіший поріг форми для режиму ANY_ORIENTATION — компенсує втрату
+     фільтра повороту (MAX_ROTATION_DEVIATION_RAD у ньому не діє), щоб
+     сумарна стійкість до шуму не просіла.
+     Було 0.22 — разом зі зниженим ADAPTIVE_THRESHOLD_OFFSET центроїди
+     якорів на папері трохи менш точні, ніж на екрані, і форма
+     чотирикутника гуляє сильніше навіть коли якорі знайдені правильно.
+     0.30 дає більше простору для цього шуму, залишаючись достатньо
+     строгим, щоб не плутати випадкові плями з реальними якорями */
+  const QUAD_SHAPE_TOLERANCE_STRICT = 0.30;
   // диск має бути в прицільній рамці по центру кадру — якщо центр знайденого
   // чотирикутника далеко від центру кадру, це, найімовірніше, випадкова
   // пляма збоку, а не справжній диск
@@ -1118,20 +1163,41 @@ function tryDecode() {
   registerReading(text, totalMismatches, invalidRings);
 }
 
+/* ================================================================
+   ПІДТВЕРДЖЕННЯ РЕЗУЛЬТАТУ — толерантне до одиничного шуму.
+   Раніше вимагалось трьох ІДЕНТИЧНИХ рядків поспіль; на друкованому
+   папері один зашумлений кадр (відблиск, тремтіння руки) майже завжди
+   давав хоч одну відмінність і обнуляв весь прогрес — звідси відчуття
+   "найменший рух все скидає". Тепер: зашумлений кадр (мало не пройшов
+   NOISE_MISMATCH_THRESHOLD/invalidRings) просто ігнорується без скидання
+   прогресу, а "інший, але схожий" результат (до READING_MISMATCH_TOLERANCE
+   символів різниці) приєднується до того самого кластера замість того,
+   щоб почати його заново. Фінальний текст — найчастіший варіант у
+   кластері, а не обов'язково останній кадр.
+   ================================================================ */
 function registerReading(text, mismatches, invalidRings) {
   if (locking) return;
 
   if (mismatches > NOISE_MISMATCH_THRESHOLD || invalidRings > 0) {
-    scanHistory = [];
-    targetRingProgress = 0;
+    // одиничний явно зашумлений кадр більше не скидає накопичений
+    // прогрес — просто пропускаємо його і чекаємо наступний
     setStatus(STR[CURRENT_LANG].statusRawNoise);
     return;
   }
 
-  if (scanHistory.length && scanHistory[scanHistory.length - 1] === text) {
-    scanHistory.push(text);
-  } else {
+  if (scanHistory.length === 0) {
     scanHistory = [text];
+  } else {
+    const reference = scanHistory[scanHistory.length - 1];
+    const diff = textDiffCount(text, reference);
+    if (diff <= READING_MISMATCH_TOLERANCE) {
+      scanHistory.push(text);
+      if (scanHistory.length > HISTORY_CAP) scanHistory.shift();
+    } else {
+      // це вже справді інший результат (інший диск або сильний шум) —
+      // тільки тепер починаємо кластер заново
+      scanHistory = [text];
+    }
   }
 
   targetRingProgress = Math.min(scanHistory.length, CONFIRM_STREAK);
@@ -1139,7 +1205,8 @@ function registerReading(text, mismatches, invalidRings) {
 
   if (scanHistory.length >= CONFIRM_STREAK && !locking) {
     locking = true;
-    lockHoldTimeoutId = setTimeout(() => finishScan(text), LOCK_HOLD_MS);
+    const finalText = mostCommonReading(scanHistory);
+    lockHoldTimeoutId = setTimeout(() => finishScan(finalText), LOCK_HOLD_MS);
   }
 }
 
