@@ -289,48 +289,6 @@ video {
   0%, 49% { opacity: 1; }
   50%, 100% { opacity: 0; }
 }
-
-/* ===== ЛОГ ДЛЯ ДЕБАГУ ===== */
-
-.log-card {
-  width: min(460px, 92vw);
-  margin: 16px auto 0;
-  background: #0e4a78;
-  border: 2px solid #ffffff33;
-  border-radius: 8px;
-  padding: 14px;
-}
-.log-card label {
-  display: block;
-  font-size: 12px;
-  color: #aacbe8;
-  margin-bottom: 8px;
-}
-.log-card textarea {
-  width: 100%;
-  box-sizing: border-box;
-  background: #0b3d63;
-  color: #aacbe8;
-  font-family: monospace;
-  font-size: 11px;
-  line-height: 1.4;
-  border: 1px solid #ffffff33;
-  border-radius: 6px;
-  padding: 8px;
-  resize: vertical;
-}
-.log-card button {
-  background: #ffd479;
-  color: #0b3d63;
-  border: none;
-  border-radius: 6px;
-  padding: 8px 14px;
-  font-size: 13px;
-  font-weight: bold;
-  cursor: pointer;
-  margin: 8px 6px 0 0;
-}
-.log-card button.secondary { background: #1a5b8f; color: #fff; }
 </style>
 </head>
 <body>
@@ -403,13 +361,6 @@ video {
 
 </div>
 
-<div class="log-card">
-  <label>Лог (для дебагу — скинь мені весь текст, коли щось піде не так)</label>
-  <textarea id="logArea" readonly rows="8"></textarea>
-  <button onclick="copyLog()">Копіювати</button>
-  <button class="secondary" onclick="clearLog()">Очистити</button>
-</div>
-
 <script>
 /* ================================================================
    МОВА ІНТЕРФЕЙСУ + АЛФАВІТ ДЕКОДУВАННЯ — той самий перемикач керує
@@ -438,7 +389,7 @@ const STR = {
     statusStabilizing: 'Стабілізація геометрії...',
     statusTooClose: 'Занадто близько — трохи відсунь',
     statusOffCenter: 'Тримай диск ближче до центру кадру',
-    statusRawNoise: (m, inv) => `Сирий шум (${m}/114${inv ? `, невалідних кілець: ${inv}` : ''})`,
+    statusRawNoise: 'Сирий шум, шукаю патерн...',
     statusHubUnconfirmed: 'Геометрія не підтверджена, шукаю...',
     statusCandidate: (cur, total) => `Кандидат (${cur}/${total})`,
     statusCameraError: (msg) => `Помилка камери: ${msg}`,
@@ -450,7 +401,7 @@ const STR = {
     statusStabilizing: 'Stabilizing geometry...',
     statusTooClose: 'Too close — move back a bit',
     statusOffCenter: 'Keep the disc closer to the center of the frame',
-    statusRawNoise: (m, inv) => `Raw noise (${m}/114${inv ? `, invalid rings: ${inv}` : ''})`,
+    statusRawNoise: 'Raw noise, seeking pattern...',
     statusHubUnconfirmed: 'Geometry not confirmed, searching...',
     statusCandidate: (cur, total) => `Candidate (${cur}/${total})`,
     statusCameraError: (msg) => `Camera error: ${msg}`,
@@ -534,6 +485,14 @@ const SRC_RIGHT  = { x: CX + Math.cos(ANCHOR_ANGLES[3]) * ANCHOR_R, y: CY + Math
 
 const ANALYSIS_SIZE = 340;
 
+/* радіус кола прицілу в аналізованому кадрі — використовується для
+   пошуку якорів (flood fill). Гістограма Оцу навмисно рахується по
+   всьому кадру, а не лише в цьому колі: спроба обмежити її колом
+   прицілу давала гірший результат навіть при звичайному освітленні
+   (див. історію змін) — фон за межами кола на практиці допомагає
+   Оцу відділити темні знаки від світлого поля диска, а не заважає. */
+const GUIDE_SEARCH_RADIUS_PX = ANALYSIS_SIZE * 0.40;
+
 const analysisCanvas = document.createElement('canvas');
 analysisCanvas.width = ANALYSIS_SIZE;
 analysisCanvas.height = ANALYSIS_SIZE;
@@ -546,6 +505,65 @@ const floodQueueY = new Int32Array(FLOOD_QUEUE_CAP);
 
 const MIN_TRIANGLE_SIDE_PX = 40;
 const MAX_TRIANGLE_SIDE_PX = 300;
+
+/* ----------------------------------------------------------------
+   ОТСУ-ПОРІГ ДЛЯ ЯКОРІВ, ОБМЕЖЕНИЙ КОЛОМ ПРИЦІЛУ.
+
+   Раніше тут був локальний адаптивний поріг (порівняння з середньою
+   яскравістю у вузькому вікні навколо кожного пікселя) — його
+   прибрано, бо він вимагав АБСОЛЮТНОЇ різниці яскравості мітка/фон.
+   На світлому кадрі (білий аркуш, екран) автоекспозиція камери
+   стискає контраст, і ця абсолютна різниця падає нижче порогу навіть
+   при чіткому чорнилі — пошук якорів ламався першим, ще до того, як
+   справа доходила до самого сканування.
+
+   Отсу натомість шукає ВІДНОСНИЙ розрив у гістограмі — межу між двома
+   "хмарами" значень (папір і чорнило), а не абсолютну відстань від
+   локального середнього. Навіть коли обидві хмари стиснуті ближче
+   одна до одної автоекспозицією, розрив між ними здебільшого лишається
+   знаходимим, доки чорнило й папір не злилися в одну хмару повністю.
+
+   Рахуємо Отсу ЛИШЕ в межах кола прицілу (GUIDE_SEARCH_RADIUS_PX), а
+   не по всьому кадру 340×340, як THRESH нижче (для читання кілець) —
+   саме в цьому колі й відбувається пошук якорів, тож пікселі поза ним
+   лише розмивають гістограму даремно й не додають корисного сигналу. */
+function computeCircleOtsu(data, W, H, cx, cy, radius) {
+  const hist = new Uint32Array(256);
+  let sampleCount = 0;
+  const r2 = radius * radius;
+  const step = 2; // крок вибірки — досить густо для стабільної гістограми, але швидко
+  const y0 = Math.max(0, Math.round(cy - radius));
+  const y1 = Math.min(H, Math.round(cy + radius));
+  const x0 = Math.max(0, Math.round(cx - radius));
+  const x1 = Math.min(W, Math.round(cx + radius));
+  for (let y = y0; y < y1; y += step) {
+    const dy = y - cy;
+    for (let x = x0; x < x1; x += step) {
+      const dx = x - cx;
+      if (dx * dx + dy * dy > r2) continue;
+      const i = (y * W + x) * 4;
+      const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      hist[Math.min(255, Math.max(0, Math.round(l)))]++;
+      sampleCount++;
+    }
+  }
+  if (sampleCount === 0) return 128;
+  let sumAll = 0;
+  for (let t = 0; t < 256; t++) sumAll += t * hist[t];
+  let sumB = 0, wB = 0, maxVar = 0, thresh = 128;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    const wF = sampleCount - wB;
+    if (wF === 0) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sumAll - sumB) / wF;
+    const varBetween = wB * wF * (mB - mF) * (mB - mF);
+    if (varBetween > maxVar) { maxVar = varBetween; thresh = t; }
+  }
+  return thresh;
+}
 
 /* false (за замовчуванням) — старий режим: диск має лежати приблизно
    "правильно" (низ приблизно внизу кадру, ±MAX_ROTATION_DEVIATION_DEG).
@@ -595,12 +613,47 @@ const CONFIRM_STREAK = 3;
 const LOCK_HOLD_MS = 550;
 const NOISE_MISMATCH_THRESHOLD = 28; // ~25% від загальної кількості дзеркальних пар (114 при 19 символах)
 
+/* скільки символів можуть відрізнятися між двома прочитаннями, щоб вони
+   все одно рахувались "тим самим" диском, а не скидали прогрес до нуля.
+   На папері один кадр з випадковим відблиском може дати 1-2 неправильні
+   символи навіть коли диск лежить нерухомо — раніше це прирівнювалось
+   до "інший диск" і обнуляло весь streak. Тепер такий кадр просто
+   приєднується до кластера, а не ламає його */
+const READING_MISMATCH_TOLERANCE = 2;
+
+const HISTORY_CAP = 6; // не даємо scanHistory рости необмежено, поки триває збіг
+
 let scanHistory = [];
 let locking = false;
 let camStream = null, scanTimer = null;
 let lockHoldTimeoutId = null;
 
 function dist(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2); }
+
+/* кількість позицій, де два прочитаних рядки відрізняються (з урахуванням
+   різної довжини — обрив на іншому END_INDEX теж рахується різницею) */
+function textDiffCount(a, b) {
+  let diff = Math.abs(a.length - b.length);
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    if (a[i] !== b[i]) diff++;
+  }
+  return diff;
+}
+
+/* найчастіший варіант серед накопичених кадрів кластера — фінальний
+   результат бере не обов'язково останній кадр, а "медіану" по кластеру,
+   що додатково гасить одиничний шум перед тим, як показати текст */
+function mostCommonReading(arr) {
+  const counts = new Map();
+  let best = arr[0], bestCount = 0;
+  for (const t of arr) {
+    const c = (counts.get(t) || 0) + 1;
+    counts.set(t, c);
+    if (c > bestCount) { bestCount = c; best = t; }
+  }
+  return best;
+}
 
 function solveLinearSystem(A, b) {
   const n = b.length;
@@ -691,7 +744,6 @@ async function startScan() {
     ringProgress = 0;
     locking = false;
     document.getElementById('centerGuide').style.display = 'block';
-    logEvent(`сесія: старт, тема=${DISC_THEME}, будь-яка орієнтація=${ALLOW_ANY_ORIENTATION}, мова=${CURRENT_LANG}`);
     setStatus(STR[CURRENT_LANG].statusSearchingAnchors);
     scanTimer = setInterval(scanFrame, 220);
     if (overlayAnimFrame) cancelAnimationFrame(overlayAnimFrame);
@@ -729,58 +781,11 @@ function teardownCamera() {
 }
 
 function stopScan() {
-  logEvent('сесія: перервано вручну');
   teardownCamera();
 }
 
 function setStatus(text) {
-  const st = document.getElementById('scanStatus');
-  st.textContent = text;
-  logStatusChange(text);
-}
-
-/* ================================================================
-   ЛОГ ДЛЯ ДЕБАГУ
-   ================================================================ */
-const MAX_LOG_LINES = 600;
-let logLines = [];
-let lastLoggedStatus = null;
-
-function logTimestamp() {
-  const d = new Date();
-  return d.toTimeString().split(' ')[0] + '.' + String(d.getMilliseconds()).padStart(3, '0');
-}
-function logEvent(msg) {
-  logLines.push(`[${logTimestamp()}] ${msg}`);
-  if (logLines.length > MAX_LOG_LINES) logLines.shift();
-  renderLog();
-}
-function logStatusChange(text) {
-  if (text === lastLoggedStatus) return; // не дублюємо однаковий статус щокадру
-  lastLoggedStatus = text;
-  logEvent('статус: ' + text);
-}
-function renderLog() {
-  const area = document.getElementById('logArea');
-  if (!area) return;
-  area.value = logLines.join('\n');
-  area.scrollTop = area.scrollHeight;
-}
-async function copyLog() {
-  const text = logLines.join('\n');
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch (e) {
-    const area = document.getElementById('logArea');
-    area.focus();
-    area.select();
-    try { document.execCommand('copy'); } catch (e2) {}
-  }
-}
-function clearLog() {
-  logLines = [];
-  lastLoggedStatus = null;
-  renderLog();
+  document.getElementById('scanStatus').textContent = text;
 }
 
 function scanFrame() {
@@ -817,33 +822,12 @@ function tryDecode() {
     return data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
   }
 
-  // пошук і калібрування обмежено колом прицілу (#centerGuide, 68% кадру в
-  // CSS) з невеликим запасом — трохи ширше за видиме коло, щоб не відсікати
-  // якір, якщо диск лежить трохи ближче до краю кола, ніж ідеально по центру
-  const GUIDE_SEARCH_RADIUS_PX = ANALYSIS_SIZE * 0.40;
-
-  // Отсу-поріг рахуємо лише в межах цього кола, а не по всьому кадру.
-  // Якщо рахувати по всьому кадру — на рівномірно яскравому оточенні
-  // (біла стіна/стіл навколо диска, а не лише сам диск) гістограма "тоне"
-  // у величезній масі однаково світлих пікселів поза зоною інтересу:
-  // темні знаки — крихітна частка від загальної кількості пікселів,
-  // гістограма стає практично одномодальною, і поріг стає випадковим чи
-  // просто хибним — навіть коли контраст усередині самого диска цілком
-  // достатній для впевненого розділення.
   const hist = new Uint32Array(256);
   let sampleCount = 0;
-  const histY0 = Math.max(0, Math.round(H / 2 - GUIDE_SEARCH_RADIUS_PX));
-  const histY1 = Math.min(H, Math.round(H / 2 + GUIDE_SEARCH_RADIUS_PX));
-  const histX0 = Math.max(0, Math.round(W / 2 - GUIDE_SEARCH_RADIUS_PX));
-  const histX1 = Math.min(W, Math.round(W / 2 + GUIDE_SEARCH_RADIUS_PX));
-  for (let y = histY0; y < histY1; y += 2) {
-    for (let x = histX0; x < histX1; x += 2) {
-      if (Math.hypot(x - W / 2, y - H / 2) > GUIDE_SEARCH_RADIUS_PX) continue;
-      const i = (y * W + x) * 4;
-      const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-      hist[Math.min(255, Math.max(0, Math.round(l)))]++;
-      sampleCount++;
-    }
+  for (let i = 0; i < data.length; i += 32) {
+    const l = data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
+    hist[Math.min(255, Math.max(0, Math.round(l)))]++;
+    sampleCount++;
   }
   let sumAll = 0;
   for (let t = 0; t < 256; t++) sumAll += t * hist[t];
@@ -859,7 +843,26 @@ function tryDecode() {
     const varBetween = wB * wF * (mB - mF) * (mB - mF);
     if (varBetween > maxVar) { maxVar = varBetween; THRESH = t; }
   }
+  // на яскравому/малоконтрастному фоні гістограма стає майже одномодальною,
+  // і Отсу-поріг може "тремтіти" від кадру до кадру. Просте змішування з
+  // попереднім калібруванням (lastGoodThresh) виявилось ризикованим: якщо
+  // перше калібрування невдале, воно із вагою 70% заражає всі наступні
+  // кадри до кінця сесії без жодного запобіжника — тому прибрано.
   function isMark(l) { return DISC_THEME === 'dark' ? l > THRESH : l < THRESH; }
+
+  // Отсу-поріг для пошуку якорів, порахований ЛИШЕ в межах кола прицілу
+  // (а не по всьому кадру, як THRESH вище для читання кілець) — див.
+  // великий коментар біля функції computeCircleOtsu вище
+  const anchorThresh = computeCircleOtsu(data, W, H, W / 2, H / 2, GUIDE_SEARCH_RADIUS_PX);
+  function isMarkAnchor(x, y) {
+    const l = lum(x, y);
+    return DISC_THEME === 'dark' ? l > anchorThresh : l < anchorThresh;
+  }
+
+  // пошук плям обмежено колом прицілу (#centerGuide, 68% кадру в CSS) з
+  // невеликим запасом — так трекер більше не ганяється за випадковими
+  // плямами по кутах екрана; трохи ширше за сам приціл, щоб не відсікати
+  // якорі диска, що лежить трохи ближче до краю кола, ніж ідеально по центру
 
   let searchX0 = Math.max(6, W / 2 - GUIDE_SEARCH_RADIUS_PX);
   let searchX1 = Math.min(W - 6, W / 2 + GUIDE_SEARCH_RADIUS_PX);
@@ -881,7 +884,7 @@ function tryDecode() {
       // додатково відсікаємо кути прямокутника пошуку — приціл круглий,
       // а не квадратний, тож без цього кути все одно шукали б поза колом
       if (Math.hypot(x - W / 2, y - H / 2) > GUIDE_SEARCH_RADIUS_PX) continue;
-      if (isMark(lum(x, y)) && !visited[y * W + x]) {
+      if (isMarkAnchor(x, y) && !visited[y * W + x]) {
         floodQueueX[0] = x; floodQueueY[0] = y;
         let qHead = 0, qTail = 1;
         let sx = 0, sy = 0, cnt = 0;
@@ -889,7 +892,7 @@ function tryDecode() {
         while (qHead < qTail && cnt < 1200) {
           const px = floodQueueX[qHead], py = floodQueueY[qHead];
           qHead++;
-          if (px < 0 || px >= W || py < 0 || py >= H || visited[py * W + px] || !isMark(lum(px, py))) continue;
+          if (px < 0 || px >= W || py < 0 || py >= H || visited[py * W + px] || !isMarkAnchor(px, py)) continue;
           visited[py * W + px] = 1;
           sx += px; sy += py; cnt++;
           if (px < minPX) minPX = px;
@@ -917,10 +920,25 @@ function tryDecode() {
   }
 
   markBlobs.sort((a, b) => b.size - a.size);
+
+  /* ДІАГНОСТИКА (тимчасово): малюємо кожну знайдену пляму жовтим колом
+     просто на відео. Це дозволяє на власні очі побачити, що камера
+     сприймає як "потенційний якір" на реальному папері — замість того,
+     щоб я вгадував числа наосліп. Радіус кола залежить від розміру
+     плями (cnt), щоб відрізняти дрібний шум від великих міток. */
+  for (const b of markBlobs) {
+    const r = Math.max(3, Math.min(14, Math.sqrt(b.size)));
+    overlayCtx.strokeStyle = 'rgba(255, 230, 0, 0.85)';
+    overlayCtx.lineWidth = 1.5;
+    overlayCtx.beginPath();
+    overlayCtx.arc(b.x, b.y, r, 0, Math.PI * 2);
+    overlayCtx.stroke();
+  }
+
   if (markBlobs.length < 4) {
     handleTrackingMiss();
     lastTriangle = null;
-    setStatus(STR[CURRENT_LANG].statusSearchingAnchors);
+    setStatus(STR[CURRENT_LANG].statusSearchingAnchors + ` [плям: ${markBlobs.length}]`);
     return;
   }
 
@@ -928,10 +946,13 @@ function tryDecode() {
   const EXP_LONG_SIDE = ANCHOR_R * Math.sqrt(3);
   const EXP_SHORT_SIDE = ANCHOR_R;
   const QUAD_SHAPE_TOLERANCE = 0.35;
-  // жорсткіший поріг форми для режиму ANY_ORIENTATION — компенсує втрату
-  // фільтра повороту (MAX_ROTATION_DEVIATION_RAD у ньому не діє), щоб
-  // сумарна стійкість до шуму не просіла
-  const QUAD_SHAPE_TOLERANCE_STRICT = 0.35;
+  /* жорсткіший поріг форми для режиму ANY_ORIENTATION — компенсує втрату
+     фільтра повороту (MAX_ROTATION_DEVIATION_RAD у ньому не діє), щоб
+     сумарна стійкість до шуму не просіла.
+     Було 0.22 — залишено на 0.30, щоб дати трохи простору для шуму
+     форми на друкованому папері (нерівні краї міток), залишаючись
+     достатньо строгим, щоб не плутати випадкові плями з якорями */
+  const QUAD_SHAPE_TOLERANCE_STRICT = 0.30;
   // диск має бути в прицільній рамці по центру кадру — якщо центр знайденого
   // чотирикутника далеко від центру кадру, це, найімовірніше, випадкова
   // пляма збоку, а не справжній диск
@@ -992,10 +1013,24 @@ function tryDecode() {
     return { bottom, top, left, right };
   }
 
-  const candidates = markBlobs.slice(0, Math.min(12, markBlobs.length));
+  /* було 12 — розширено до 18, бо на папері справжні якорі не завжди
+     є найбільшими 4 плямами (шум/текстура паперу теж дає плями), тож
+     їм потрібно більше шансів потрапити в пул перебору комбінацій */
+  const candidates = markBlobs.slice(0, Math.min(18, markBlobs.length));
   let bestQuad = null, bestScore = Infinity;
   let sawOversized = false;
   let sawOffCenter = false;
+  let closestShapeErr = Infinity; // ДІАГНОСТИКА: найкраща (мінімальна) похибка форми серед УСІХ спроб, навіть невдалих
+
+  // ДІАГНОСТИКА: кандидати, що беруть участь у переборі, виділяємо
+  // окремим кольором (блакитний), поверх жовтих кіл усіх плям
+  for (const c of candidates) {
+    overlayCtx.strokeStyle = 'rgba(80, 200, 255, 0.9)';
+    overlayCtx.lineWidth = 2;
+    overlayCtx.beginPath();
+    overlayCtx.arc(c.x, c.y, 4, 0, Math.PI * 2);
+    overlayCtx.stroke();
+  }
 
   for (let i0 = 0; i0 < candidates.length; i0++) {
     for (let i1 = i0 + 1; i1 < candidates.length; i1++) {
@@ -1031,6 +1066,10 @@ function tryDecode() {
             relErr(dist(top, right), EXP_SHORT_SIDE),
           ];
           const maxErr = Math.max(...errs);
+          // ДІАГНОСТИКА: запам'ятовуємо найкращу похибку форми навіть
+          // якщо ця конкретна комбінація не пройшла поріг — щоб бачити,
+          // наскільки далеко/близько ми були від успішного збігу
+          if (maxErr < closestShapeErr) closestShapeErr = maxErr;
           const shapeTolerance = ALLOW_ANY_ORIENTATION ? QUAD_SHAPE_TOLERANCE_STRICT : QUAD_SHAPE_TOLERANCE;
           if (maxErr > shapeTolerance) continue;
 
@@ -1050,7 +1089,12 @@ function tryDecode() {
   if (!bestQuad) {
     handleTrackingMiss();
     lastTriangle = null;
-    setStatus(sawOversized ? STR[CURRENT_LANG].statusTooClose : (sawOffCenter ? STR[CURRENT_LANG].statusOffCenter : STR[CURRENT_LANG].statusStabilizing));
+    // ДІАГНОСТИКА: додаємо до звичайного статусу кількість знайдених плям
+    // і найкращу (мінімальну) похибку форми серед усіх спроб — потрібен
+    // поріг ≤30% (QUAD_SHAPE_TOLERANCE_STRICT), щоб комбінація пройшла
+    const shapeDiag = closestShapeErr === Infinity ? '—' : Math.round(closestShapeErr * 100) + '%';
+    const diag = ` [плям:${markBlobs.length} форма:${shapeDiag}]`;
+    setStatus((sawOversized ? STR[CURRENT_LANG].statusTooClose : (sawOffCenter ? STR[CURRENT_LANG].statusOffCenter : STR[CURRENT_LANG].statusStabilizing)) + diag);
     return;
   }
 
@@ -1144,23 +1188,41 @@ function tryDecode() {
   registerReading(text, totalMismatches, invalidRings);
 }
 
+/* ================================================================
+   ПІДТВЕРДЖЕННЯ РЕЗУЛЬТАТУ — толерантне до одиничного шуму.
+   Раніше вимагалось трьох ІДЕНТИЧНИХ рядків поспіль; на друкованому
+   папері один зашумлений кадр (відблиск, тремтіння руки) майже завжди
+   давав хоч одну відмінність і обнуляв весь прогрес — звідси відчуття
+   "найменший рух все скидає". Тепер: зашумлений кадр (мало не пройшов
+   NOISE_MISMATCH_THRESHOLD/invalidRings) просто ігнорується без скидання
+   прогресу, а "інший, але схожий" результат (до READING_MISMATCH_TOLERANCE
+   символів різниці) приєднується до того самого кластера замість того,
+   щоб почати його заново. Фінальний текст — найчастіший варіант у
+   кластері, а не обов'язково останній кадр.
+   ================================================================ */
 function registerReading(text, mismatches, invalidRings) {
   if (locking) return;
 
   if (mismatches > NOISE_MISMATCH_THRESHOLD || invalidRings > 0) {
-    logEvent(`read: ШУМ text="${text || '(порожньо)'}" mismatches=${mismatches} invalid=${invalidRings} (поріг ${NOISE_MISMATCH_THRESHOLD})`);
-    scanHistory = [];
-    targetRingProgress = 0;
-    setStatus(STR[CURRENT_LANG].statusRawNoise(mismatches, invalidRings));
+    // одиничний явно зашумлений кадр більше не скидає накопичений
+    // прогрес — просто пропускаємо його і чекаємо наступний
+    setStatus(STR[CURRENT_LANG].statusRawNoise);
     return;
   }
 
-  logEvent(`read: "${text || '(порожньо)'}" mismatches=${mismatches}`);
-
-  if (scanHistory.length && scanHistory[scanHistory.length - 1] === text) {
-    scanHistory.push(text);
-  } else {
+  if (scanHistory.length === 0) {
     scanHistory = [text];
+  } else {
+    const reference = scanHistory[scanHistory.length - 1];
+    const diff = textDiffCount(text, reference);
+    if (diff <= READING_MISMATCH_TOLERANCE) {
+      scanHistory.push(text);
+      if (scanHistory.length > HISTORY_CAP) scanHistory.shift();
+    } else {
+      // це вже справді інший результат (інший диск або сильний шум) —
+      // тільки тепер починаємо кластер заново
+      scanHistory = [text];
+    }
   }
 
   targetRingProgress = Math.min(scanHistory.length, CONFIRM_STREAK);
@@ -1168,7 +1230,8 @@ function registerReading(text, mismatches, invalidRings) {
 
   if (scanHistory.length >= CONFIRM_STREAK && !locking) {
     locking = true;
-    lockHoldTimeoutId = setTimeout(() => finishScan(text), LOCK_HOLD_MS);
+    const finalText = mostCommonReading(scanHistory);
+    lockHoldTimeoutId = setTimeout(() => finishScan(finalText), LOCK_HOLD_MS);
   }
 }
 
@@ -1177,7 +1240,6 @@ function registerReading(text, mismatches, invalidRings) {
    заглушки. Нічого нікуди не зберігається — наступне сканування
    просто перезапише це поле заново. */
 function finishScan(text) {
-  logEvent(`LOCK: "${text}"`);
   teardownCamera();
   revealMessage(text || '(порожньо)');
   document.getElementById('accordion').classList.remove('state-down');
