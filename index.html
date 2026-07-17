@@ -743,12 +743,21 @@ function tryDecode() {
   }
   function isMark(l) { return DISC_THEME === 'dark' ? l > THRESH : l < THRESH; }
 
-  let searchX0 = 6, searchX1 = W - 6, searchY0 = 6, searchY1 = H - 6;
+  // пошук плям обмежено колом прицілу (#centerGuide, 68% кадру в CSS) з
+  // невеликим запасом — так трекер більше не ганяється за випадковими
+  // плямами по кутах екрана; трохи ширше за сам приціл, щоб не відсікати
+  // якорі диска, що лежить трохи ближче до краю кола, ніж ідеально по центру
+  const GUIDE_SEARCH_RADIUS_PX = ANALYSIS_SIZE * 0.40;
+
+  let searchX0 = Math.max(6, W / 2 - GUIDE_SEARCH_RADIUS_PX);
+  let searchX1 = Math.min(W - 6, W / 2 + GUIDE_SEARCH_RADIUS_PX);
+  let searchY0 = Math.max(6, H / 2 - GUIDE_SEARCH_RADIUS_PX);
+  let searchY1 = Math.min(H - 6, H / 2 + GUIDE_SEARCH_RADIUS_PX);
   if (TRACKING_ENABLED && trackedCenter) {
-    searchX0 = Math.max(6, trackedCenter.x - TRACKING_SEARCH_RADIUS);
-    searchX1 = Math.min(W - 6, trackedCenter.x + TRACKING_SEARCH_RADIUS);
-    searchY0 = Math.max(6, trackedCenter.y - TRACKING_SEARCH_RADIUS);
-    searchY1 = Math.min(H - 6, trackedCenter.y + TRACKING_SEARCH_RADIUS);
+    searchX0 = Math.max(searchX0, trackedCenter.x - TRACKING_SEARCH_RADIUS);
+    searchX1 = Math.min(searchX1, trackedCenter.x + TRACKING_SEARCH_RADIUS);
+    searchY0 = Math.max(searchY0, trackedCenter.y - TRACKING_SEARCH_RADIUS);
+    searchY1 = Math.min(searchY1, trackedCenter.y + TRACKING_SEARCH_RADIUS);
   }
 
   const markBlobs = [];
@@ -757,6 +766,9 @@ function tryDecode() {
 
   for (let y = searchY0; y < searchY1; y += 4) {
     for (let x = searchX0; x < searchX1; x += 4) {
+      // додатково відсікаємо кути прямокутника пошуку — приціл круглий,
+      // а не квадратний, тож без цього кути все одно шукали б поза колом
+      if (Math.hypot(x - W / 2, y - H / 2) > GUIDE_SEARCH_RADIUS_PX) continue;
       if (isMark(lum(x, y)) && !visited[y * W + x]) {
         floodQueueX[0] = x; floodQueueY[0] = y;
         let qHead = 0, qTail = 1;
