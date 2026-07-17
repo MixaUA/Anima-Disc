@@ -468,6 +468,7 @@ function setDiscTheme(theme) {
   scanHistory = [];
   resetTracking();
   lastTriangle = null;
+  lastGoodThresh = null;
   targetRingProgress = 0;
   ringProgress = 0;
 }
@@ -516,7 +517,7 @@ function angleDiffRad(a, b) {
   return diff;
 }
 
-const TRACKING_ENABLED = false;
+const TRACKING_ENABLED = true;
 const TRACKING_SEARCH_RADIUS = 70;
 const TRACKING_LOST_AFTER = 5;
 let trackedCenter = null;
@@ -535,6 +536,7 @@ function handleTrackingMiss() {
 }
 
 let lastTriangle = null;
+let lastGoodThresh = null; // EMA-згладжений поріг з останнього надійного калібрування по диску
 let targetRingProgress = 0;
 let ringProgress = 0;
 const RING_EASE = 0.18;
@@ -638,6 +640,7 @@ async function startScan() {
     scanHistory = [];
     resetTracking();
     lastTriangle = null;
+    lastGoodThresh = null;
     targetRingProgress = 0;
     ringProgress = 0;
     locking = false;
@@ -665,6 +668,7 @@ function teardownCamera() {
 
   resetTracking();
   lastTriangle = null;
+  lastGoodThresh = null;
   targetRingProgress = 0;
   ringProgress = 0;
   locking = false;
@@ -740,6 +744,14 @@ function tryDecode() {
     const mF = (sumAll - sumB) / wF;
     const varBetween = wB * wF * (mB - mF) * (mB - mF);
     if (varBetween > maxVar) { maxVar = varBetween; THRESH = t; }
+  }
+  // на яскравому/малоконтрастному фоні гістограма стає майже одномодальною,
+  // і Отсу-поріг "тремтить" від кадру до кадру через сенсорний шум — навіть
+  // коли сама сцена не змінюється. Якщо вже було надійне калібрування по
+  // самому диску (нижче, fgLum/bgLum), підмішуємо його як стабілізуючий
+  // якір для свіжого Отсу, а не довіряємо кожному кадру наосліп.
+  if (lastGoodThresh !== null) {
+    THRESH = THRESH * 0.3 + lastGoodThresh * 0.7;
   }
   function isMark(l) { return DISC_THEME === 'dark' ? l > THRESH : l < THRESH; }
 
@@ -978,6 +990,10 @@ function tryDecode() {
   const MIN_CALIBRATION_SEPARATION = 15;
   if (Math.abs(fgLum - bgLum) >= MIN_CALIBRATION_SEPARATION) {
     THRESH = (fgLum + bgLum) / 2;
+    // це калібрування — найнадійніший з усіх можливих сигналів (взято з
+    // реального знаку й реального фону на самому диску, а не з усієї сцени),
+    // тож зберігаємо його як якір для згладжування Отсу на наступних кадрах
+    lastGoodThresh = lastGoodThresh === null ? THRESH : lastGoodThresh * 0.5 + THRESH * 0.5;
   }
 
   // --- зчитування кілець (змінна кількість секторів і символів) ---
