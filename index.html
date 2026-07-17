@@ -485,41 +485,50 @@ const SRC_RIGHT  = { x: CX + Math.cos(ANCHOR_ANGLES[3]) * ANCHOR_R, y: CY + Math
 
 const ANALYSIS_SIZE = 340;
 
-/* радіус кола прицілу в аналізованому кадрі — використовується для
-   пошуку якорів (flood fill). Гістограма Оцу навмисно рахується по
-   всьому кадру, а не лише в цьому колі: спроба обмежити її колом
-   прицілу давала гірший результат навіть при звичайному освітленні
-   (див. історію змін) — фон за межами кола на практиці допомагає
-   Оцу відділити темні знаки від світлого поля диска, а не заважає. */
-const GUIDE_SEARCH_RADIUS_PX = ANALYSIS_SIZE * 0.40;
+/* ================================================================
+   ШАБЛОН ФІКСОВАНИХ ЗОН ПОШУКУ (5 контрольних точок) — хаб (центр) і
+   4 якорі (низ/верх/ліво/право) на радіусі TEMPLATE_ANCHOR_R_PX під
+   тими самими кутами, що й ANCHOR_ANGLES. Користувач сам підлаштовує
+   диск (відстань до камери й поворот) під ці позиції — як прицілювання
+   під рамку QR-сканера. Це прибирає перебір комбінацій і пошук на 360°:
+   кожна зона вже відповідає конкретній ролі за своєю фіксованою позицією. */
+const TEMPLATE_CENTER = { x: ANALYSIS_SIZE / 2, y: ANALYSIS_SIZE / 2 };
+const TEMPLATE_ANCHOR_R_PX = 112;
+const TEMPLATE_ANCHORS = {
+  bottom: { x: TEMPLATE_CENTER.x + Math.cos(ANCHOR_ANGLES[0]) * TEMPLATE_ANCHOR_R_PX, y: TEMPLATE_CENTER.y + Math.sin(ANCHOR_ANGLES[0]) * TEMPLATE_ANCHOR_R_PX },
+  top:    { x: TEMPLATE_CENTER.x + Math.cos(ANCHOR_ANGLES[1]) * TEMPLATE_ANCHOR_R_PX, y: TEMPLATE_CENTER.y + Math.sin(ANCHOR_ANGLES[1]) * TEMPLATE_ANCHOR_R_PX },
+  left:   { x: TEMPLATE_CENTER.x + Math.cos(ANCHOR_ANGLES[2]) * TEMPLATE_ANCHOR_R_PX, y: TEMPLATE_CENTER.y + Math.sin(ANCHOR_ANGLES[2]) * TEMPLATE_ANCHOR_R_PX },
+  right:  { x: TEMPLATE_CENTER.x + Math.cos(ANCHOR_ANGLES[3]) * TEMPLATE_ANCHOR_R_PX, y: TEMPLATE_CENTER.y + Math.sin(ANCHOR_ANGLES[3]) * TEMPLATE_ANCHOR_R_PX },
+};
+
+// радіус вікна пошуку навколо кожної контрольної точки — запас на неточне
+// прицілювання, лишаючись малим, щоб не захопити сусідні деталі/шум паперу
+const ZONE_SEARCH_RADIUS_PX = 34;
+// мінімальна кількість "міток"-пікселів у зоні, щоб вважати її знайденою
+const ZONE_MIN_MARK_PIXELS = 18;
+
+let lastZoneResults = null; // останній результат пошуку 5 зон — для overlay в animateOverlay
 
 const analysisCanvas = document.createElement('canvas');
 analysisCanvas.width = ANALYSIS_SIZE;
 analysisCanvas.height = ANALYSIS_SIZE;
 const analysisCtx = analysisCanvas.getContext('2d', { willReadFrequently: true });
 
-const visitedBuf = new Uint8Array(ANALYSIS_SIZE * ANALYSIS_SIZE);
-/* Попередньо виділений буфер для Summed Area Table (інтегральне зображення)
-   для адаптивного порогу Бредлі — виділяємо один раз, щоб не смітити GC
-   при кожному кадрі (scanFrame викликається кожні 220 мс). */
-const satBuf = new Float32Array(ANALYSIS_SIZE * ANALYSIS_SIZE);
-const FLOOD_QUEUE_CAP = 4900;
-const floodQueueX = new Int32Array(FLOOD_QUEUE_CAP);
-const floodQueueY = new Int32Array(FLOOD_QUEUE_CAP);
-
 const MIN_TRIANGLE_SIDE_PX = 40;
 const MAX_TRIANGLE_SIDE_PX = 300;
 
 /* ----------------------------------------------------------------
-   ОТСУ-ПОРІГ ДЛЯ ЯКОРІВ, ОБМЕЖЕНИЙ КОЛОМ ПРИЦІЛУ.
+   ОТСУ-ПОРІГ, ОБМЕЖЕНИЙ НЕВЕЛИКИМ КОЛОМ. Універсальна функція — тепер
+   викликається окремо для кожної з 5 контрольних зон (findMarkInZone
+   нижче), а не один раз на весь кадр.
 
-   Раніше тут був локальний адаптивний поріг (порівняння з середньою
-   яскравістю у вузькому вікні навколо кожного пікселя) — його
-   прибрано, бо він вимагав АБСОЛЮТНОЇ різниці яскравості мітка/фон.
-   На світлому кадрі (білий аркуш, екран) автоекспозиція камери
-   стискає контраст, і ця абсолютна різниця падає нижче порогу навіть
-   при чіткому чорнилі — пошук якорів ламався першим, ще до того, як
-   справа доходила до самого сканування.
+   Раніше пошук якорів ішов через локальний адаптивний поріг (порівняння
+   з середньою яскравістю у вузькому вікні навколо кожного пікселя) —
+   його прибрано, бо він вимагав АБСОЛЮТНОЇ різниці яскравості мітка/фон.
+   На світлому кадрі (білий аркуш, екран) автоекспозиція камери стискає
+   контраст, і ця абсолютна різниця падає нижче порогу навіть при
+   чіткому чорнилі — пошук якорів ламався першим, ще до того, як справа
+   доходила до самого сканування.
 
    Отсу натомість шукає ВІДНОСНИЙ розрив у гістограмі — межу між двома
    "хмарами" значень (папір і чорнило), а не абсолютну відстань від
@@ -527,10 +536,10 @@ const MAX_TRIANGLE_SIDE_PX = 300;
    одна до одної автоекспозицією, розрив між ними здебільшого лишається
    знаходимим, доки чорнило й папір не злилися в одну хмару повністю.
 
-   Рахуємо Отсу ЛИШЕ в межах кола прицілу (GUIDE_SEARCH_RADIUS_PX), а
+   Рахуємо Отсу лише в межах переданого радіусу навколо (cx, cy), а
    не по всьому кадру 340×340, як THRESH нижче (для читання кілець) —
-   саме в цьому колі й відбувається пошук якорів, тож пікселі поза ним
-   лише розмивають гістограму даремно й не додають корисного сигналу. */
+   зайві пікселі поза зоною лише розмивають гістограму даремно й не
+   додають корисного сигналу. */
 function computeCircleOtsu(data, W, H, cx, cy, radius) {
   const hist = new Uint32Array(256);
   let sampleCount = 0;
@@ -569,26 +578,37 @@ function computeCircleOtsu(data, W, H, cx, cy, radius) {
   return thresh;
 }
 
-/* false (за замовчуванням) — старий режим: диск має лежати приблизно
-   "правильно" (низ приблизно внизу кадру, ±MAX_ROTATION_DEVIATION_DEG).
-   true — сканування з будь-якого боку/під будь-яким кутом повороту в
-   площині кадру; компенсується жорсткішим QUAD_SHAPE_TOLERANCE_STRICT
-   нижче в tryDecode, бо фільтр повороту тоді не діє. */
-const ALLOW_ANY_ORIENTATION = true;
+/* Шукає позицію мітки в межах невеликого вікна навколо однієї з 5
+   контрольних точок шаблону (targetX, targetY, radius). Рахує локальний
+   Отсу-поріг ЛИШЕ в цьому вікні (переви користовуючи computeCircleOtsu)
+   і повертає центроїд (середню позицію) усіх пікселів, що пройшли поріг
+   як "мітка". Повертає null, якщо мало пікселів пройшло поріг — зона
+   вважається "не знайденою" цього кадру. */
+function findMarkInZone(data, W, H, targetX, targetY, radius) {
+  const thresh = computeCircleOtsu(data, W, H, targetX, targetY, radius);
+  const r2 = radius * radius;
+  const x0 = Math.max(0, Math.round(targetX - radius));
+  const x1 = Math.min(W, Math.round(targetX + radius));
+  const y0 = Math.max(0, Math.round(targetY - radius));
+  const y1 = Math.min(H, Math.round(targetY + radius));
 
-const EXPECTED_ROTATION_RAD = Math.PI / 2;
-const MAX_ROTATION_DEVIATION_DEG = 40;
-const MAX_ROTATION_DEVIATION_RAD = (MAX_ROTATION_DEVIATION_DEG * Math.PI) / 180;
-
-function angleDiffRad(a, b) {
-  let diff = a - b;
-  while (diff > Math.PI) diff -= Math.PI * 2;
-  while (diff < -Math.PI) diff += Math.PI * 2;
-  return diff;
+  let sx = 0, sy = 0, cnt = 0;
+  for (let y = y0; y < y1; y++) {
+    const dy = y - targetY;
+    for (let x = x0; x < x1; x++) {
+      const dx = x - targetX;
+      if (dx * dx + dy * dy > r2) continue;
+      const i = (y * W + x) * 4;
+      const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      const isMarkPixel = DISC_THEME === 'dark' ? l > thresh : l < thresh;
+      if (isMarkPixel) { sx += x; sy += y; cnt++; }
+    }
+  }
+  if (cnt < ZONE_MIN_MARK_PIXELS) return null;
+  return { x: sx / cnt, y: sy / cnt };
 }
 
 const TRACKING_ENABLED = false;
-const TRACKING_SEARCH_RADIUS = 70;
 const TRACKING_LOST_AFTER = 5;
 let trackedCenter = null;
 let trackedMissCount = 0;
@@ -696,8 +716,31 @@ function applyHomography(H, x, y) {
   return { x: (H.h11 * x + H.h12 * y + H.h13) / w, y: (H.h21 * x + H.h22 * y + H.h23) / w };
 }
 
+/* Малює 5 контрольних точок шаблону (хаб + 4 якорі) як постійний
+   орієнтир для прицілювання — сірим, якщо зона порожня цього кадру,
+   зеленим, якщо там щойно знайдено мітку. На відміну від lastTriangle
+   (з'являється лише коли геометрія вже зібрана), це малюється завжди,
+   поки триває сканування — саме на це користувач і наводить диск. */
+function drawTemplateGuide(displayCtx) {
+  const zones = [
+    TEMPLATE_ANCHORS.bottom, TEMPLATE_ANCHORS.top, TEMPLATE_ANCHORS.left, TEMPLATE_ANCHORS.right, TEMPLATE_CENTER
+  ];
+  const found = lastZoneResults
+    ? [lastZoneResults.bottom, lastZoneResults.top, lastZoneResults.left, lastZoneResults.right, lastZoneResults.hub]
+    : [null, null, null, null, null];
+
+  zones.forEach((pos, i) => {
+    displayCtx.strokeStyle = found[i] ? 'rgba(120,255,140,0.9)' : 'rgba(255,255,255,0.35)';
+    displayCtx.lineWidth = 2;
+    displayCtx.beginPath();
+    displayCtx.arc(pos.x, pos.y, ZONE_SEARCH_RADIUS_PX, 0, Math.PI * 2);
+    displayCtx.stroke();
+  });
+}
+
 function drawFocusTriangle(displayCtx, W, H) {
   displayCtx.clearRect(0, 0, W, H);
+  drawTemplateGuide(displayCtx);
   if (!lastTriangle) return;
 
   const vertices = lastTriangle;
@@ -744,6 +787,7 @@ async function startScan() {
     scanHistory = [];
     resetTracking();
     lastTriangle = null;
+    lastZoneResults = null;
     targetRingProgress = 0;
     ringProgress = 0;
     locking = false;
@@ -771,6 +815,7 @@ function teardownCamera() {
 
   resetTracking();
   lastTriangle = null;
+  lastZoneResults = null;
   targetRingProgress = 0;
   ringProgress = 0;
   locking = false;
@@ -804,21 +849,6 @@ function scanFrame() {
   } else {
     analysisCtx.drawImage(video, 0, 0, ANALYSIS_SIZE, ANALYSIS_SIZE);
   }
-
-  /* Програмне затемнення фону: малюємо темну маску поверх аналітичного
-     буфера поза колом прицілу (GUIDE_SEARCH_RADIUS_PX) перед тим, як
-     читати пікселі. Це штучно забирає білий фон з гістограми і дає Оцу
-     (THRESH для читання кілець) чітку бімодальну гістограму навіть коли
-     реальний фон навколо диска яскраво-білий. Пікселі всередині кола
-     (диск, якорі) лишаються незмінними. */
-  analysisCtx.save();
-  analysisCtx.fillStyle = 'rgba(0, 0, 0, 1.0)'; // повністю чорний — найкращий контраст для Оцу
-  analysisCtx.beginPath();
-  analysisCtx.rect(0, 0, ANALYSIS_SIZE, ANALYSIS_SIZE);
-  // Коло «вирізається» з маски завдяки правилу evenodd
-  analysisCtx.arc(ANALYSIS_SIZE / 2, ANALYSIS_SIZE / 2, GUIDE_SEARCH_RADIUS_PX, 0, Math.PI * 2, true);
-  analysisCtx.fill('evenodd');
-  analysisCtx.restore();
 
   tryDecode();
 }
@@ -869,307 +899,53 @@ function tryDecode() {
   // кадри до кінця сесії без жодного запобіжника — тому прибрано.
   function isMark(l) { return DISC_THEME === 'dark' ? l > THRESH : l < THRESH; }
 
-  /* Для пошуку якорів використовуємо адаптивний поріг Бредлі замість
-     глобального Оцу. Проблема Оцу: на яскравому/білому фоні автоекспозиція
-     камери стискає контраст і гістограма стає майже унімодальною —
-     Оцу не може знайти розрив між фоном і темними якорями диска.
-     Бредлі натомість порівнює кожен піксель з ЛОКАЛЬНИМ середнім у вікні
-     навколо нього: навіть якщо весь кадр вибілений, темний якір залишається
-     темним відносно свого найближчого оточення. */
+  /* ================================================================
+     ПОШУК ЗА ФІКСОВАНОЮ ГЕОМЕТРІЄЮ (5 контрольних зон) замість пошуку
+     "будь-де" в колі прицілу з подальшим перебором комбінацій.
 
-  // 1. Будуємо Summed Area Table (інтегральне зображення) по яскравості
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 4;
-      const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-      const above  = y > 0 ? satBuf[(y - 1) * W + x] : 0;
-      const left   = x > 0 ? satBuf[y * W + (x - 1)] : 0;
-      const corner = (x > 0 && y > 0) ? satBuf[(y - 1) * W + (x - 1)] : 0;
-      satBuf[y * W + x] = l + above + left - corner;
-    }
-  }
+     Раніше: збирали всі темні/світлі плями в межах кола прицілу, потім
+     перебирали комбінації по 4 з них, підбираючи ту, що найкраще
+     збігається з очікуваною формою ромба. Шум текстури паперу засмічував
+     пул кандидатів, і толерантність форми доводилось постійно послаблювати.
 
-  // 2. Параметри вікна та чутливість
-  // Вікно ~1/8 ширини кадру (≈42px) — достатньо велике, щоб охопити
-  // якір цілком і захопити трохи фону навколо нього для порівняння,
-  // але не занадто велике, щоб не розмивати локальний контраст.
-  const BRADLEY_HALF = Math.round(W / 8);
-  // T = 0.12: піксель вважається міткою якщо він темніший за
-  // 88% (або яскравіший за 112%) від локального середнього.
-  // Можна збільшити до 0.15 для більш агресивного виявлення
-  // або зменшити до 0.08 для суворішого (менше хибних спрацьовувань).
-  const BRADLEY_T = 0.15;
+     Тепер: геометрія диска відома заздалегідь (кути й відносні відстані
+     фіксовані), тож шукаємо мітку в 5 конкретних невеликих зонах навколо
+     очікуваних екранних позицій (TEMPLATE_CENTER/TEMPLATE_ANCHORS вище).
+     Користувач сам підлаштовує диск під ці позиції. Жодного перебору —
+     кожна зона вже відповідає конкретній ролі (низ/верх/ліво/право) за
+     своєю фіксованою позицією, а не за формою знайденого чотирикутника. */
 
-  function isMarkAnchorBradley(x, y) {
-    x = Math.round(x); y = Math.round(y);
-    if (x < 0 || x >= W || y < 0 || y >= H) return false;
-    // Межі вікна (clamp до країв зображення)
-    const x1 = Math.max(0, x - BRADLEY_HALF);
-    const y1 = Math.max(0, y - BRADLEY_HALF);
-    const x2 = Math.min(W - 1, x + BRADLEY_HALF);
-    const y2 = Math.min(H - 1, y + BRADLEY_HALF);
-    const count = (x2 - x1 + 1) * (y2 - y1 + 1);
-    // Сума яскравостей у вікні за O(1) через SAT
-    const sum = satBuf[y2 * W + x2]
-      - (y1 > 0 ? satBuf[(y1 - 1) * W + x2] : 0)
-      - (x1 > 0 ? satBuf[y2 * W + (x1 - 1)] : 0)
-      + (x1 > 0 && y1 > 0 ? satBuf[(y1 - 1) * W + (x1 - 1)] : 0);
-    const localMean = sum / count;
-    const i = (y * W + x) * 4;
-    const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-    // Світлий диск — темні мітки темніші за локальне середнє на T
-    // Темний диск — світлі мітки яскравіші за локальне середнє на T
-    return DISC_THEME === 'dark' ? l > localMean * (1 + BRADLEY_T) : l < localMean * (1 - BRADLEY_T);
-  }
+  const foundHub    = findMarkInZone(data, W, H, TEMPLATE_CENTER.x, TEMPLATE_CENTER.y, ZONE_SEARCH_RADIUS_PX);
+  const foundBottom = findMarkInZone(data, W, H, TEMPLATE_ANCHORS.bottom.x, TEMPLATE_ANCHORS.bottom.y, ZONE_SEARCH_RADIUS_PX);
+  const foundTop    = findMarkInZone(data, W, H, TEMPLATE_ANCHORS.top.x, TEMPLATE_ANCHORS.top.y, ZONE_SEARCH_RADIUS_PX);
+  const foundLeft   = findMarkInZone(data, W, H, TEMPLATE_ANCHORS.left.x, TEMPLATE_ANCHORS.left.y, ZONE_SEARCH_RADIUS_PX);
+  const foundRight  = findMarkInZone(data, W, H, TEMPLATE_ANCHORS.right.x, TEMPLATE_ANCHORS.right.y, ZONE_SEARCH_RADIUS_PX);
 
-  // пошук плям обмежено колом прицілу (#centerGuide, 68% кадру в CSS) з
-  // невеликим запасом — так трекер більше не ганяється за випадковими
-  // плямами по кутах екрана; трохи ширше за сам приціл, щоб не відсікати
-  // якорі диска, що лежить трохи ближче до краю кола, ніж ідеально по центру
+  // зберігаємо результат для animateOverlay (окремий rAF-цикл) — щоб
+  // підсвічувати знайдені/незнайдені зони одразу, а не чекати наступного
+  // виклику tryDecode
+  lastZoneResults = { hub: foundHub, bottom: foundBottom, top: foundTop, left: foundLeft, right: foundRight };
+  const zonesFoundCount = [foundHub, foundBottom, foundTop, foundLeft, foundRight].filter(Boolean).length;
 
-  let searchX0 = Math.max(6, W / 2 - GUIDE_SEARCH_RADIUS_PX);
-  let searchX1 = Math.min(W - 6, W / 2 + GUIDE_SEARCH_RADIUS_PX);
-  let searchY0 = Math.max(6, H / 2 - GUIDE_SEARCH_RADIUS_PX);
-  let searchY1 = Math.min(H - 6, H / 2 + GUIDE_SEARCH_RADIUS_PX);
-  if (TRACKING_ENABLED && trackedCenter) {
-    searchX0 = Math.max(searchX0, trackedCenter.x - TRACKING_SEARCH_RADIUS);
-    searchX1 = Math.min(searchX1, trackedCenter.x + TRACKING_SEARCH_RADIUS);
-    searchY0 = Math.max(searchY0, trackedCenter.y - TRACKING_SEARCH_RADIUS);
-    searchY1 = Math.min(searchY1, trackedCenter.y + TRACKING_SEARCH_RADIUS);
-  }
-
-  const markBlobs = [];
-  visitedBuf.fill(0);
-  const visited = visitedBuf;
-
-  for (let y = searchY0; y < searchY1; y += 4) {
-    for (let x = searchX0; x < searchX1; x += 4) {
-      // додатково відсікаємо кути прямокутника пошуку — приціл круглий,
-      // а не квадратний, тож без цього кути все одно шукали б поза колом
-      if (Math.hypot(x - W / 2, y - H / 2) > GUIDE_SEARCH_RADIUS_PX) continue;
-      if (isMarkAnchorBradley(x, y) && !visited[y * W + x]) {
-        floodQueueX[0] = x; floodQueueY[0] = y;
-        let qHead = 0, qTail = 1;
-        let sx = 0, sy = 0, cnt = 0;
-        let minPX = Infinity, maxPX = -Infinity, minPY = Infinity, maxPY = -Infinity;
-        while (qHead < qTail && cnt < 1200) {
-          const px = floodQueueX[qHead], py = floodQueueY[qHead];
-          qHead++;
-          if (px < 0 || px >= W || py < 0 || py >= H || visited[py * W + px] || !isMarkAnchorBradley(px, py)) continue;
-          visited[py * W + px] = 1;
-          sx += px; sy += py; cnt++;
-          if (px < minPX) minPX = px;
-          if (px > maxPX) maxPX = px;
-          if (py < minPY) minPY = py;
-          if (py > maxPY) maxPY = py;
-          if (qTail + 4 <= floodQueueX.length) {
-            floodQueueX[qTail] = px + 4; floodQueueY[qTail] = py; qTail++;
-            floodQueueX[qTail] = px - 4; floodQueueY[qTail] = py; qTail++;
-            floodQueueX[qTail] = px; floodQueueY[qTail] = py + 4; qTail++;
-            floodQueueX[qTail] = px; floodQueueY[qTail] = py - 4; qTail++;
-          }
-        }
-        if (cnt > 6 && cnt < 1200) {
-          const bboxW = maxPX - minPX + 4;
-          const bboxH = maxPY - minPY + 4;
-          const fillRatio = (cnt * 16) / (bboxW * bboxH);
-          const aspect = Math.max(bboxW, bboxH) / Math.min(bboxW, bboxH);
-          /* Якорі — кола. Ідеальне коло в bbox: fillRatio = π/4 ≈ 0.785.
-             Під перспективою коло → еліпс, fillRatio трохи падає, але
-             залишається значно вищим, ніж у дугоподібних фрагментів кілець
-             чи нерівних символьних плям, що дає чудовий фільтр.
-             0.62 — відсікає дуги й видовжені шматки, але ще пропускає
-             еліпси навіть при помірному нахилі диска.
-             aspect ≤ 1.5 (замість 1.7) — ще пропускає перспективний еліпс,
-             але відфільтровує дуже витягнуті несиметричні плями. */
-          if (fillRatio >= 0.5 && aspect <= 1.7) {
-            markBlobs.push({ x: sx / cnt, y: sy / cnt, size: cnt });
-          }
-        }
-      }
-    }
-  }
-
-  markBlobs.sort((a, b) => b.size - a.size);
-
-  /* ДІАГНОСТИКА (тимчасово): малюємо кожну знайдену пляму жовтим колом
-     просто на відео. Це дозволяє на власні очі побачити, що камера
-     сприймає як "потенційний якір" на реальному папері — замість того,
-     щоб я вгадував числа наосліп. Радіус кола залежить від розміру
-     плями (cnt), щоб відрізняти дрібний шум від великих міток. */
-  for (const b of markBlobs) {
-    const r = Math.max(3, Math.min(14, Math.sqrt(b.size)));
-    overlayCtx.strokeStyle = 'rgba(255, 230, 0, 0.85)';
-    overlayCtx.lineWidth = 1.5;
-    overlayCtx.beginPath();
-    overlayCtx.arc(b.x, b.y, r, 0, Math.PI * 2);
-    overlayCtx.stroke();
-  }
-
-  if (markBlobs.length < 4) {
+  if (!foundBottom || !foundTop || !foundLeft || !foundRight) {
     handleTrackingMiss();
     lastTriangle = null;
-    setStatus(STR[CURRENT_LANG].statusSearchingAnchors + ` [плям: ${markBlobs.length}]`);
+    setStatus(STR[CURRENT_LANG].statusSearchingAnchors + ` [зон: ${zonesFoundCount}/5]`);
     return;
   }
 
-  const EXP_DIAG = 2 * ANCHOR_R;
-  const EXP_LONG_SIDE = ANCHOR_R * Math.sqrt(3);
-  const EXP_SHORT_SIDE = ANCHOR_R;
-  const QUAD_SHAPE_TOLERANCE = 0.35;
-  /* жорсткіший поріг форми для режиму ANY_ORIENTATION — компенсує втрату
-     фільтра повороту (MAX_ROTATION_DEVIATION_RAD у ньому не діє), щоб
-     сумарна стійкість до шуму не просіла.
-     Було 0.22 — залишено на 0.30, щоб дати трохи простору для шуму
-     форми на друкованому папері (нерівні краї міток), залишаючись
-     достатньо строгим, щоб не плутати випадкові плями з якорями */
-  const QUAD_SHAPE_TOLERANCE_STRICT = 0.30;
-  // диск має бути в прицільній рамці по центру кадру — якщо центр знайденого
-  // чотирикутника далеко від центру кадру, це, найімовірніше, випадкова
-  // пляма збоку, а не справжній диск
-  const MAX_CENTER_DEVIATION_PX = ANALYSIS_SIZE * 0.4;
+  const bottomAnchor = foundBottom, topAnchor = foundTop, leftAnchor = foundLeft, rightAnchor = foundRight;
 
-  /* стара логіка, без змін: "низ" — точка з макс. Y на екрані, "верх" —
-     з мін. Y, ліво/право — за x серед решти двох. Прив'язана до припущення,
-     що фізичний низ диска приблизно внизу кадру (звідси й потрібен окремий
-     фільтр MAX_ROTATION_DEVIATION_RAD нижче в основному циклі) */
-  function assignQuadRolesFixedOrientation(pts) {
-    let bottom = pts[0], top = pts[0];
-    for (const p of pts) {
-      if (p.y > bottom.y) bottom = p;
-      if (p.y < top.y) top = p;
-    }
-    if (bottom === top) return null;
-    const rest = pts.filter(p => p !== bottom && p !== top);
-    if (rest.length !== 2) return null;
-    const left = rest[0].x <= rest[1].x ? rest[0] : rest[1];
-    const right = rest[0].x <= rest[1].x ? rest[1] : rest[0];
-    return { bottom, top, left, right };
-  }
-
-  /* орієнтаційно-незалежна логіка: диск можна класти під будь-яким кутом.
-     Діагональ (bottom-top) завжди найдовша з 6 попарних відстаней між
-     4 точками (2R > R√3), тому визначається без прив'язки до екрана.
-     "top" — та з двох діагональних точок, що ближча сумарно до решти
-     двох (короткі сторони до left/right), "bottom" — навпаки.
-     "left"/"right" визначаються знаком векторного добутку відносно осі
-     bottom→top — це зберігає правильну відповідність фізичним якорям
-     диска (210°/330°) при будь-якому повороті, а не лише за екранним x,
-     який працює лише в межах вузького діапазону кутів. */
-  function assignQuadRolesAnyOrientation(pts) {
-    let bestPair = null, bestDist = -1;
-    for (let a = 0; a < 4; a++) {
-      for (let b = a + 1; b < 4; b++) {
-        const d = dist(pts[a], pts[b]);
-        if (d > bestDist) { bestDist = d; bestPair = [pts[a], pts[b]]; }
-      }
-    }
-    const [P, Q] = bestPair;
-    const rest = pts.filter(p => p !== P && p !== Q);
-    if (rest.length !== 2) return null;
-    const [R, S] = rest;
-
-    const sumP = dist(P, R) + dist(P, S);
-    const sumQ = dist(Q, R) + dist(Q, S);
-    const top = sumP <= sumQ ? P : Q;
-    const bottom = sumP <= sumQ ? Q : P;
-
-    const axisX = top.x - bottom.x, axisY = top.y - bottom.y;
-    function crossSign(pt) { return axisX * (pt.y - bottom.y) - axisY * (pt.x - bottom.x); }
-    const crossR = crossSign(R);
-    if (crossR === 0) return null; // вироджений випадок — точки на одній лінії
-    const left = crossR < 0 ? R : S;
-    const right = crossR < 0 ? S : R;
-
-    return { bottom, top, left, right };
-  }
-
-  /* було 12 — розширено до 18, бо на папері справжні якорі не завжди
-     є найбільшими 4 плямами (шум/текстура паперу теж дає плями), тож
-     їм потрібно більше шансів потрапити в пул перебору комбінацій */
-  const candidates = markBlobs.slice(0, Math.min(18, markBlobs.length));
-  let bestQuad = null, bestScore = Infinity;
-  let sawOversized = false;
-  let sawOffCenter = false;
-  let closestShapeErr = Infinity; // ДІАГНОСТИКА: найкраща (мінімальна) похибка форми серед УСІХ спроб, навіть невдалих
-
-  // ДІАГНОСТИКА: кандидати, що беруть участь у переборі, виділяємо
-  // окремим кольором (блакитний), поверх жовтих кіл усіх плям
-  for (const c of candidates) {
-    overlayCtx.strokeStyle = 'rgba(80, 200, 255, 0.9)';
-    overlayCtx.lineWidth = 2;
-    overlayCtx.beginPath();
-    overlayCtx.arc(c.x, c.y, 4, 0, Math.PI * 2);
-    overlayCtx.stroke();
-  }
-
-  for (let i0 = 0; i0 < candidates.length; i0++) {
-    for (let i1 = i0 + 1; i1 < candidates.length; i1++) {
-      for (let i2 = i1 + 1; i2 < candidates.length; i2++) {
-        for (let i3 = i2 + 1; i3 < candidates.length; i3++) {
-          const pts = [candidates[i0], candidates[i1], candidates[i2], candidates[i3]];
-
-          const roles = ALLOW_ANY_ORIENTATION
-            ? assignQuadRolesAnyOrientation(pts)
-            : assignQuadRolesFixedOrientation(pts);
-          if (!roles) continue;
-          const { bottom, top, left, right } = roles;
-
-          const cx4 = (bottom.x + top.x + left.x + right.x) / 4;
-          const cy4 = (bottom.y + top.y + left.y + right.y) / 4;
-          const centerDeviation = Math.hypot(cx4 - ANALYSIS_SIZE / 2, cy4 - ANALYSIS_SIZE / 2);
-          if (centerDeviation > MAX_CENTER_DEVIATION_PX) { sawOffCenter = true; continue; }
-
-          const dDiag = dist(bottom, top);
-          if (dDiag > MAX_TRIANGLE_SIDE_PX * 1.3) { sawOversized = true; continue; }
-          if (dDiag < MIN_TRIANGLE_SIDE_PX * 1.3) continue;
-
-          const scale = dDiag / EXP_DIAG;
-          function relErr(measured, expected) {
-            const e = expected * scale;
-            return Math.abs(measured - e) / e;
-          }
-          const errs = [
-            relErr(dist(bottom, left), EXP_LONG_SIDE),
-            relErr(dist(bottom, right), EXP_LONG_SIDE),
-            relErr(dist(left, right), EXP_LONG_SIDE),
-            relErr(dist(top, left), EXP_SHORT_SIDE),
-            relErr(dist(top, right), EXP_SHORT_SIDE),
-          ];
-          const maxErr = Math.max(...errs);
-          // ДІАГНОСТИКА: запам'ятовуємо найкращу похибку форми навіть
-          // якщо ця конкретна комбінація не пройшла поріг — щоб бачити,
-          // наскільки далеко/близько ми були від успішного збігу
-          if (maxErr < closestShapeErr) closestShapeErr = maxErr;
-          const shapeTolerance = ALLOW_ANY_ORIENTATION ? QUAD_SHAPE_TOLERANCE_STRICT : QUAD_SHAPE_TOLERANCE;
-          if (maxErr > shapeTolerance) continue;
-
-          if (!ALLOW_ANY_ORIENTATION) {
-            const candRotation = Math.atan2(bottom.y - cy4, bottom.x - cx4);
-            const deviation = Math.abs(angleDiffRad(candRotation, EXPECTED_ROTATION_RAD));
-            if (deviation > MAX_ROTATION_DEVIATION_RAD) continue;
-          }
-
-          const score = errs.reduce((a, b) => a + b, 0);
-          if (score < bestScore) { bestScore = score; bestQuad = { bottom, top, left, right }; }
-        }
-      }
-    }
-  }
-
-  if (!bestQuad) {
+  // грубий запобіжник від випадкового шуму — не основна перевірка форми
+  // (її більше нема), радше "диск явно занадто близько/далеко від камери"
+  const dDiag = dist(bottomAnchor, topAnchor);
+  if (dDiag > MAX_TRIANGLE_SIDE_PX * 1.3 || dDiag < MIN_TRIANGLE_SIDE_PX * 1.3) {
     handleTrackingMiss();
     lastTriangle = null;
-    // ДІАГНОСТИКА: додаємо до звичайного статусу кількість знайдених плям
-    // і найкращу (мінімальну) похибку форми серед усіх спроб — потрібен
-    // поріг ≤30% (QUAD_SHAPE_TOLERANCE_STRICT), щоб комбінація пройшла
-    const shapeDiag = closestShapeErr === Infinity ? '—' : Math.round(closestShapeErr * 100) + '%';
-    const diag = ` [плям:${markBlobs.length} форма:${shapeDiag}]`;
-    setStatus((sawOversized ? STR[CURRENT_LANG].statusTooClose : (sawOffCenter ? STR[CURRENT_LANG].statusOffCenter : STR[CURRENT_LANG].statusStabilizing)) + diag);
+    setStatus(STR[CURRENT_LANG].statusTooClose + ` [зон: ${zonesFoundCount}/5]`);
     return;
   }
 
-  const { bottom: bottomAnchor, top: topAnchor, left: leftAnchor, right: rightAnchor } = bestQuad;
   const cx = (bottomAnchor.x + topAnchor.x + leftAnchor.x + rightAnchor.x) / 4;
   const cy = (bottomAnchor.y + topAnchor.y + leftAnchor.y + rightAnchor.y) / 4;
   handleTrackingHit(cx, cy);
@@ -1181,18 +957,14 @@ function tryDecode() {
     [bottomAnchor, topAnchor, leftAnchor, rightAnchor]
   );
 
-  const predictedHub = applyHomography(transform, CX, CY);
-  const hubScaleEstimate = dist(bottomAnchor, topAnchor) / (2 * ANCHOR_R);
-  const HUB_CHECK_TOLERANCE_PX = Math.max(12, hubScaleEstimate * HUB_R * 1.3);
-  let hubOk = false;
-  for (const b of markBlobs) {
-    if (dist(b, predictedHub) < HUB_CHECK_TOLERANCE_PX) { hubOk = true; break; }
-  }
-  if (!hubOk) {
+  // хаб — додаткове підтвердження, не потрібне для самої гомографії
+  // (яка будується лише з 4 якорів), але якщо зона хаба порожня, це
+  // підозріло: диск, найімовірніше, лежить неправильно чи зсунутий
+  if (!foundHub) {
     handleTrackingMiss();
     scanHistory = [];
     targetRingProgress = 0;
-    setStatus(STR[CURRENT_LANG].statusHubUnconfirmed);
+    setStatus(STR[CURRENT_LANG].statusHubUnconfirmed + ` [зон: ${zonesFoundCount}/5]`);
     return;
   }
 
