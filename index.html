@@ -805,6 +805,21 @@ function scanFrame() {
     analysisCtx.drawImage(video, 0, 0, ANALYSIS_SIZE, ANALYSIS_SIZE);
   }
 
+  /* Програмне затемнення фону: малюємо темну маску поверх аналітичного
+     буфера поза колом прицілу (GUIDE_SEARCH_RADIUS_PX) перед тим, як
+     читати пікселі. Це штучно забирає білий фон з гістограми і дає Оцу
+     (THRESH для читання кілець) чітку бімодальну гістограму навіть коли
+     реальний фон навколо диска яскраво-білий. Пікселі всередині кола
+     (диск, якорі) лишаються незмінними. */
+  analysisCtx.save();
+  analysisCtx.fillStyle = 'rgba(0, 0, 0, 0.88)';
+  analysisCtx.beginPath();
+  analysisCtx.rect(0, 0, ANALYSIS_SIZE, ANALYSIS_SIZE);
+  // Коло «вирізається» з маски завдяки правилу evenodd
+  analysisCtx.arc(ANALYSIS_SIZE / 2, ANALYSIS_SIZE / 2, GUIDE_SEARCH_RADIUS_PX, 0, Math.PI * 2, true);
+  analysisCtx.fill('evenodd');
+  analysisCtx.restore();
+
   tryDecode();
 }
 
