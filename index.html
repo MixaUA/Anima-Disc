@@ -959,7 +959,15 @@ function tryDecode() {
           const bboxH = maxPY - minPY + 4;
           const fillRatio = (cnt * 16) / (bboxW * bboxH);
           const aspect = Math.max(bboxW, bboxH) / Math.min(bboxW, bboxH);
-          if (fillRatio >= 0.5 && aspect <= 1.7) {
+          /* Якорі — кола. Ідеальне коло в bbox: fillRatio = π/4 ≈ 0.785.
+             Під перспективою коло → еліпс, fillRatio трохи падає, але
+             залишається значно вищим, ніж у дугоподібних фрагментів кілець
+             чи нерівних символьних плям, що дає чудовий фільтр.
+             0.62 — відсікає дуги й видовжені шматки, але ще пропускає
+             еліпси навіть при помірному нахилі диска.
+             aspect ≤ 1.5 (замість 1.7) — ще пропускає перспективний еліпс,
+             але відфільтровує дуже витягнуті несиметричні плями. */
+          if (fillRatio >= 0.62 && aspect <= 1.5) {
             markBlobs.push({ x: sx / cnt, y: sy / cnt, size: cnt });
           }
         }
