@@ -485,9 +485,12 @@ const SRC_RIGHT  = { x: CX + Math.cos(ANCHOR_ANGLES[3]) * ANCHOR_R, y: CY + Math
 
 const ANALYSIS_SIZE = 340;
 
-/* радіус кола прицілу в аналізованому кадрі — використовується і для
-   пошуку якорів (flood fill), і для вибірки гістограми Оцу, щоб обидва
-   етапи працювали з однією й тією самою робочою областю */
+/* радіус кола прицілу в аналізованому кадрі — використовується для
+   пошуку якорів (flood fill). Гістограма Оцу навмисно рахується по
+   всьому кадру, а не лише в цьому колі: спроба обмежити її колом
+   прицілу давала гірший результат навіть при звичайному освітленні
+   (див. історію змін) — фон за межами кола на практиці допомагає
+   Оцу відділити темні знаки від світлого поля диска, а не заважає. */
 const GUIDE_SEARCH_RADIUS_PX = ANALYSIS_SIZE * 0.40;
 
 const analysisCanvas = document.createElement('canvas');
@@ -502,6 +505,61 @@ const floodQueueY = new Int32Array(FLOOD_QUEUE_CAP);
 
 const MIN_TRIANGLE_SIDE_PX = 40;
 const MAX_TRIANGLE_SIDE_PX = 300;
+
+/* ----------------------------------------------------------------
+   ЛОКАЛЬНИЙ АДАПТИВНИЙ ПОРІГ — тільки для пошуку якорів (flood fill
+   нижче). Замість одного порогу на весь кадр (Оцу), кожна точка
+   порівнюється із середньою яскравістю СВОГО найближчого оточення
+   (вікно ADAPTIVE_WINDOW_RADIUS_PX*2+1 пікселів). Це стійкіше до
+   нерівномірного освітлення (тінь на частині диска, градієнт світла),
+   бо поріг "пливе" по кадру разом зі зміною фону, а не порівнюється
+   з рештою кадру.
+
+   Розмір вікна — підбирається дослідно, і це чесний компроміс:
+   - завелике вікно → фактично повертаємось до глобального порогу;
+   - замале вікно → сама мітка потрапляє у своє ж вікно усереднення,
+     і локальне середнє "з'їдає" контраст мітки саму із собою.
+   Значення нижче — стартова точка, може знадобитись підбір разом
+   із реальними тестами.
+
+   Зчитування бітів кілець (sampleAt/isMark нижче) цю функцію НЕ
+   використовує — там усе ще глобальний Оцу-поріг з окремою локальною
+   калібровкою по двох точках (fgLum/bgLum). Це окрема задача. */
+const ADAPTIVE_WINDOW_RADIUS_PX = 15; // половина сторони вікна (вікно ~31x31 px)
+const ADAPTIVE_THRESHOLD_OFFSET = 12; // мінімальна різниця від локального фону, щоб рахуватись міткою
+
+function buildLuminanceIntegral(data, W, H) {
+  // сумарна таблиця яскравості (integral image) — дозволяє рахувати
+  // середню яскравість будь-якого прямокутника за O(1) незалежно від
+  // розміру вікна, замість перебору пікселів вікна щоразу
+  const integral = new Float64Array((W + 1) * (H + 1));
+  const stride = W + 1;
+  for (let y = 0; y < H; y++) {
+    let rowSum = 0;
+    const rowBase = y * W;
+    for (let x = 0; x < W; x++) {
+      const i = (rowBase + x) * 4;
+      const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      rowSum += l;
+      integral[(y + 1) * stride + (x + 1)] = integral[y * stride + (x + 1)] + rowSum;
+    }
+  }
+  return integral;
+}
+
+function integralLocalMean(integral, W, H, cx, cy, radius) {
+  const stride = W + 1;
+  const x0 = Math.max(0, cx - radius);
+  const x1 = Math.min(W - 1, cx + radius);
+  const y0 = Math.max(0, cy - radius);
+  const y1 = Math.min(H - 1, cy + radius);
+  const sum = integral[(y1 + 1) * stride + (x1 + 1)]
+            - integral[y0 * stride + (x1 + 1)]
+            - integral[(y1 + 1) * stride + x0]
+            + integral[y0 * stride + x0];
+  const count = (x1 - x0 + 1) * (y1 - y0 + 1);
+  return sum / count;
+}
 
 /* false (за замовчуванням) — старий режим: диск має лежати приблизно
    "правильно" (низ приблизно внизу кадру, ±MAX_ROTATION_DEVIATION_DEG).
@@ -725,22 +783,9 @@ function tryDecode() {
     return data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
   }
 
-  /* Гістограма для Оцу рахується лише в межах кола приціл (той самий
-     радіус GUIDE_SEARCH_RADIUS_PX, що й для пошуку якорів нижче), а не
-     по всьому кадру. Якщо рахувати по всьому кадру, яскраве оточення
-     навколо диска (стіл, стіни тощо) додає в гістограму третю групу
-     яскравості, і поріг Оцу (розрахований для двох класів) з'їжджає
-     туди, де відділяє яскраве оточення від решти — а не туди, де
-     реально проходить межа "поле диска / знак" на самому диску. Через
-     це на яскравому фоні isMark() переставало правильно відділяти
-     знаки, і якорі не знаходились. */
   const hist = new Uint32Array(256);
   let sampleCount = 0;
   for (let i = 0; i < data.length; i += 32) {
-    const pixelIdx = i / 4;
-    const px = pixelIdx % W;
-    const py = Math.floor(pixelIdx / W);
-    if (Math.hypot(px - W / 2, py - H / 2) > GUIDE_SEARCH_RADIUS_PX) continue;
     const l = data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
     hist[Math.min(255, Math.max(0, Math.round(l)))]++;
     sampleCount++;
@@ -765,6 +810,18 @@ function tryDecode() {
   // перше калібрування невдале, воно із вагою 70% заражає всі наступні
   // кадри до кінця сесії без жодного запобіжника — тому прибрано.
   function isMark(l) { return DISC_THEME === 'dark' ? l > THRESH : l < THRESH; }
+
+  // локальний адаптивний поріг для пошуку якорів (див. коментар біля
+  // ADAPTIVE_WINDOW_RADIUS_PX вище) — рахується один раз на кадр
+  const luminanceIntegral = buildLuminanceIntegral(data, W, H);
+  function isMarkLocal(x, y) {
+    const ix = Math.round(x), iy = Math.round(y);
+    const l = lum(ix, iy);
+    const bg = integralLocalMean(luminanceIntegral, W, H, ix, iy, ADAPTIVE_WINDOW_RADIUS_PX);
+    return DISC_THEME === 'dark'
+      ? l > bg + ADAPTIVE_THRESHOLD_OFFSET
+      : l < bg - ADAPTIVE_THRESHOLD_OFFSET;
+  }
 
   // пошук плям обмежено колом прицілу (#centerGuide, 68% кадру в CSS) з
   // невеликим запасом — так трекер більше не ганяється за випадковими
@@ -791,7 +848,7 @@ function tryDecode() {
       // додатково відсікаємо кути прямокутника пошуку — приціл круглий,
       // а не квадратний, тож без цього кути все одно шукали б поза колом
       if (Math.hypot(x - W / 2, y - H / 2) > GUIDE_SEARCH_RADIUS_PX) continue;
-      if (isMark(lum(x, y)) && !visited[y * W + x]) {
+      if (isMarkLocal(x, y) && !visited[y * W + x]) {
         floodQueueX[0] = x; floodQueueY[0] = y;
         let qHead = 0, qTail = 1;
         let sx = 0, sy = 0, cnt = 0;
@@ -799,7 +856,7 @@ function tryDecode() {
         while (qHead < qTail && cnt < 1200) {
           const px = floodQueueX[qHead], py = floodQueueY[qHead];
           qHead++;
-          if (px < 0 || px >= W || py < 0 || py >= H || visited[py * W + px] || !isMark(lum(px, py))) continue;
+          if (px < 0 || px >= W || py < 0 || py >= H || visited[py * W + px] || !isMarkLocal(px, py)) continue;
           visited[py * W + px] = 1;
           sx += px; sy += py; cnt++;
           if (px < minPX) minPX = px;
