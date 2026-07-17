@@ -720,12 +720,33 @@ function tryDecode() {
     return data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
   }
 
+  // пошук і калібрування обмежено колом прицілу (#centerGuide, 68% кадру в
+  // CSS) з невеликим запасом — трохи ширше за видиме коло, щоб не відсікати
+  // якір, якщо диск лежить трохи ближче до краю кола, ніж ідеально по центру
+  const GUIDE_SEARCH_RADIUS_PX = ANALYSIS_SIZE * 0.40;
+
+  // Отсу-поріг рахуємо лише в межах цього кола, а не по всьому кадру.
+  // Якщо рахувати по всьому кадру — на рівномірно яскравому оточенні
+  // (біла стіна/стіл навколо диска, а не лише сам диск) гістограма "тоне"
+  // у величезній масі однаково світлих пікселів поза зоною інтересу:
+  // темні знаки — крихітна частка від загальної кількості пікселів,
+  // гістограма стає практично одномодальною, і поріг стає випадковим чи
+  // просто хибним — навіть коли контраст усередині самого диска цілком
+  // достатній для впевненого розділення.
   const hist = new Uint32Array(256);
   let sampleCount = 0;
-  for (let i = 0; i < data.length; i += 32) {
-    const l = data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
-    hist[Math.min(255, Math.max(0, Math.round(l)))]++;
-    sampleCount++;
+  const histY0 = Math.max(0, Math.round(H / 2 - GUIDE_SEARCH_RADIUS_PX));
+  const histY1 = Math.min(H, Math.round(H / 2 + GUIDE_SEARCH_RADIUS_PX));
+  const histX0 = Math.max(0, Math.round(W / 2 - GUIDE_SEARCH_RADIUS_PX));
+  const histX1 = Math.min(W, Math.round(W / 2 + GUIDE_SEARCH_RADIUS_PX));
+  for (let y = histY0; y < histY1; y += 2) {
+    for (let x = histX0; x < histX1; x += 2) {
+      if (Math.hypot(x - W / 2, y - H / 2) > GUIDE_SEARCH_RADIUS_PX) continue;
+      const i = (y * W + x) * 4;
+      const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      hist[Math.min(255, Math.max(0, Math.round(l)))]++;
+      sampleCount++;
+    }
   }
   let sumAll = 0;
   for (let t = 0; t < 256; t++) sumAll += t * hist[t];
@@ -741,18 +762,7 @@ function tryDecode() {
     const varBetween = wB * wF * (mB - mF) * (mB - mF);
     if (varBetween > maxVar) { maxVar = varBetween; THRESH = t; }
   }
-  // на яскравому/малоконтрастному фоні гістограма стає майже одномодальною,
-  // і Отсу-поріг може "тремтіти" від кадру до кадру. Просте змішування з
-  // попереднім калібруванням (lastGoodThresh) виявилось ризикованим: якщо
-  // перше калібрування невдале, воно із вагою 70% заражає всі наступні
-  // кадри до кінця сесії без жодного запобіжника — тому прибрано.
   function isMark(l) { return DISC_THEME === 'dark' ? l > THRESH : l < THRESH; }
-
-  // пошук плям обмежено колом прицілу (#centerGuide, 68% кадру в CSS) з
-  // невеликим запасом — так трекер більше не ганяється за випадковими
-  // плямами по кутах екрана; трохи ширше за сам приціл, щоб не відсікати
-  // якорі диска, що лежить трохи ближче до краю кола, ніж ідеально по центру
-  const GUIDE_SEARCH_RADIUS_PX = ANALYSIS_SIZE * 0.40;
 
   let searchX0 = Math.max(6, W / 2 - GUIDE_SEARCH_RADIUS_PX);
   let searchX1 = Math.min(W - 6, W / 2 + GUIDE_SEARCH_RADIUS_PX);
