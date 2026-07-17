@@ -499,6 +499,10 @@ analysisCanvas.height = ANALYSIS_SIZE;
 const analysisCtx = analysisCanvas.getContext('2d', { willReadFrequently: true });
 
 const visitedBuf = new Uint8Array(ANALYSIS_SIZE * ANALYSIS_SIZE);
+/* Попередньо виділений буфер для Summed Area Table (інтегральне зображення)
+   для адаптивного порогу Бредлі — виділяємо один раз, щоб не смітити GC
+   при кожному кадрі (scanFrame викликається кожні 220 мс). */
+const satBuf = new Float32Array(ANALYSIS_SIZE * ANALYSIS_SIZE);
 const FLOOD_QUEUE_CAP = 4900;
 const floodQueueX = new Int32Array(FLOOD_QUEUE_CAP);
 const floodQueueY = new Int32Array(FLOOD_QUEUE_CAP);
@@ -850,13 +854,57 @@ function tryDecode() {
   // кадри до кінця сесії без жодного запобіжника — тому прибрано.
   function isMark(l) { return DISC_THEME === 'dark' ? l > THRESH : l < THRESH; }
 
-  // Отсу-поріг для пошуку якорів, порахований ЛИШЕ в межах кола прицілу
-  // (а не по всьому кадру, як THRESH вище для читання кілець) — див.
-  // великий коментар біля функції computeCircleOtsu вище
-  const anchorThresh = computeCircleOtsu(data, W, H, W / 2, H / 2, GUIDE_SEARCH_RADIUS_PX);
-  function isMarkAnchor(x, y) {
-    const l = lum(x, y);
-    return DISC_THEME === 'dark' ? l > anchorThresh : l < anchorThresh;
+  /* Для пошуку якорів використовуємо адаптивний поріг Бредлі замість
+     глобального Оцу. Проблема Оцу: на яскравому/білому фоні автоекспозиція
+     камери стискає контраст і гістограма стає майже унімодальною —
+     Оцу не може знайти розрив між фоном і темними якорями диска.
+     Бредлі натомість порівнює кожен піксель з ЛОКАЛЬНИМ середнім у вікні
+     навколо нього: навіть якщо весь кадр вибілений, темний якір залишається
+     темним відносно свого найближчого оточення. */
+
+  // 1. Будуємо Summed Area Table (інтегральне зображення) по яскравості
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      const above  = y > 0 ? satBuf[(y - 1) * W + x] : 0;
+      const left   = x > 0 ? satBuf[y * W + (x - 1)] : 0;
+      const corner = (x > 0 && y > 0) ? satBuf[(y - 1) * W + (x - 1)] : 0;
+      satBuf[y * W + x] = l + above + left - corner;
+    }
+  }
+
+  // 2. Параметри вікна та чутливість
+  // Вікно ~1/8 ширини кадру (≈42px) — достатньо велике, щоб охопити
+  // якір цілком і захопити трохи фону навколо нього для порівняння,
+  // але не занадто велике, щоб не розмивати локальний контраст.
+  const BRADLEY_HALF = Math.round(W / 8);
+  // T = 0.12: піксель вважається міткою якщо він темніший за
+  // 88% (або яскравіший за 112%) від локального середнього.
+  // Можна збільшити до 0.15 для більш агресивного виявлення
+  // або зменшити до 0.08 для суворішого (менше хибних спрацьовувань).
+  const BRADLEY_T = 0.12;
+
+  function isMarkAnchorBradley(x, y) {
+    x = Math.round(x); y = Math.round(y);
+    if (x < 0 || x >= W || y < 0 || y >= H) return false;
+    // Межі вікна (clamp до країв зображення)
+    const x1 = Math.max(0, x - BRADLEY_HALF);
+    const y1 = Math.max(0, y - BRADLEY_HALF);
+    const x2 = Math.min(W - 1, x + BRADLEY_HALF);
+    const y2 = Math.min(H - 1, y + BRADLEY_HALF);
+    const count = (x2 - x1 + 1) * (y2 - y1 + 1);
+    // Сума яскравостей у вікні за O(1) через SAT
+    const sum = satBuf[y2 * W + x2]
+      - (y1 > 0 ? satBuf[(y1 - 1) * W + x2] : 0)
+      - (x1 > 0 ? satBuf[y2 * W + (x1 - 1)] : 0)
+      + (x1 > 0 && y1 > 0 ? satBuf[(y1 - 1) * W + (x1 - 1)] : 0);
+    const localMean = sum / count;
+    const i = (y * W + x) * 4;
+    const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    // Світлий диск — темні мітки темніші за локальне середнє на T
+    // Темний диск — світлі мітки яскравіші за локальне середнє на T
+    return DISC_THEME === 'dark' ? l > localMean * (1 + BRADLEY_T) : l < localMean * (1 - BRADLEY_T);
   }
 
   // пошук плям обмежено колом прицілу (#centerGuide, 68% кадру в CSS) з
@@ -884,7 +932,7 @@ function tryDecode() {
       // додатково відсікаємо кути прямокутника пошуку — приціл круглий,
       // а не квадратний, тож без цього кути все одно шукали б поза колом
       if (Math.hypot(x - W / 2, y - H / 2) > GUIDE_SEARCH_RADIUS_PX) continue;
-      if (isMarkAnchor(x, y) && !visited[y * W + x]) {
+      if (isMarkAnchorBradley(x, y) && !visited[y * W + x]) {
         floodQueueX[0] = x; floodQueueY[0] = y;
         let qHead = 0, qTail = 1;
         let sx = 0, sy = 0, cnt = 0;
@@ -892,7 +940,7 @@ function tryDecode() {
         while (qHead < qTail && cnt < 1200) {
           const px = floodQueueX[qHead], py = floodQueueY[qHead];
           qHead++;
-          if (px < 0 || px >= W || py < 0 || py >= H || visited[py * W + px] || !isMarkAnchor(px, py)) continue;
+          if (px < 0 || px >= W || py < 0 || py >= H || visited[py * W + px] || !isMarkAnchorBradley(px, py)) continue;
           visited[py * W + px] = 1;
           sx += px; sy += py; cnt++;
           if (px < minPX) minPX = px;
