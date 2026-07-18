@@ -22,7 +22,7 @@ body {
   padding: 12px;
 }
 
-/* ===== ВЕРХНІЙ ПЕРЕМИКАЧ МОВИ ===== */
+/* ===== ВЕРХНІ ПЕРЕМИКАЧІ (мова + тема диска) ===== */
 
 .top-controls {
   position: fixed;
@@ -30,9 +30,20 @@ body {
   left: 16px;
   right: 16px;
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   align-items: center;
   z-index: 20;
+}
+
+.theme-toggle {
+  font-size: 12px;
+  font-family: monospace;
+  color: rgba(255,255,255,0.7);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .lang-toggle {
@@ -65,7 +76,6 @@ body {
 .accordion-container {
   width: min(460px, 92vw);
   min-height: 460px;
-  margin-top: 50px;
   background-color: #0b3d63;
   position: relative;
   display: grid;
@@ -221,10 +231,10 @@ video {
 
 #centerGuide {
   position: absolute; top: 50%; left: 50%;
-  width: 68%; height: 68%;
+  width: 55%; height: 55%;
   transform: translate(-50%, -50%);
   border: 2px dashed rgba(255,255,255,0.35);
-  border-radius: 50%;
+  border-radius: 12px;
   pointer-events: none;
   z-index: 2;
   display: none;
@@ -264,17 +274,26 @@ video {
   padding: 24px 20px;
   max-width: 320px;
   margin: 0 auto;
-  text-align: center;
+  text-align: left;
+}
+
+.field-label {
+  display: block;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #fff;
+  font-family: monospace;
+  font-size: 13px;
+  margin-bottom: 6px;
 }
 
 .field-value {
   color: rgba(255,255,255,0.8);
   font-family: monospace;
-  font-size: 18px;
+  font-size: 15px;
   line-height: 1.7;
   font-style: italic;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
 }
 
 .type-cursor {
@@ -289,11 +308,57 @@ video {
   0%, 49% { opacity: 1; }
   50%, 100% { opacity: 0; }
 }
+
+/* ===== ЛОГ ДЛЯ ДЕБАГУ ===== */
+
+.log-card {
+  width: min(460px, 92vw);
+  margin: 16px auto 0;
+  background: #0e4a78;
+  border: 2px solid #ffffff33;
+  border-radius: 8px;
+  padding: 14px;
+}
+.log-card label {
+  display: block;
+  font-size: 12px;
+  color: #aacbe8;
+  margin-bottom: 8px;
+}
+.log-card textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0b3d63;
+  color: #aacbe8;
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  border: 1px solid #ffffff33;
+  border-radius: 6px;
+  padding: 8px;
+  resize: vertical;
+}
+.log-card button {
+  background: #ffd479;
+  color: #0b3d63;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: bold;
+  cursor: pointer;
+  margin: 8px 6px 0 0;
+}
+.log-card button.secondary { background: #1a5b8f; color: #fff; }
 </style>
 </head>
 <body>
 
 <div class="top-controls">
+  <label class="theme-toggle">
+    <input type="checkbox" id="themeToggle" onchange="onThemeToggle()">
+    <span id="themeToggleLabel">Світлий диск</span>
+  </label>
   <button class="lang-toggle" id="langToggle" onclick="toggleLang(this)">УКР</button>
 </div>
 
@@ -354,11 +419,19 @@ video {
   <div class="content-area bottom-content">
     <div class="content-inner">
       <div class="result-panel">
+        <span class="field-label" id="fieldLabel">Послання:</span>
         <span class="field-value" id="msgText"></span><span class="type-cursor idle" id="msgCursor">▍</span>
       </div>
     </div>
   </div>
 
+</div>
+
+<div class="log-card">
+  <label>Лог (для дебагу — скинь мені весь текст, коли щось піде не так)</label>
+  <textarea id="logArea" readonly rows="8"></textarea>
+  <button onclick="copyLog()">Копіювати</button>
+  <button class="secondary" onclick="clearLog()">Очистити</button>
 </div>
 
 <script>
@@ -383,24 +456,26 @@ function indexToChar(i) { return CURRENT_ALPHABET[i] ?? '?'; }
 
 const STR = {
   UK: {
+    themeToggleLabel: 'Світлий диск',
     langBtn: 'УКР',
-    placeholderStub: 'Відкриваємо приховане…',
+    fieldLabel: 'Послання:',
+    placeholderStub: 'Тут з’явиться розшифроване послання.',
     statusSearchingAnchors: 'Пошук якорів...',
     statusStabilizing: 'Стабілізація геометрії...',
     statusTooClose: 'Занадто близько — трохи відсунь',
-    statusOffCenter: 'Тримай диск ближче до центру кадру',
     statusRawNoise: 'Сирий шум, шукаю патерн...',
     statusHubUnconfirmed: 'Геометрія не підтверджена, шукаю...',
     statusCandidate: (cur, total) => `Кандидат (${cur}/${total})`,
     statusCameraError: (msg) => `Помилка камери: ${msg}`,
   },
   EN: {
+    themeToggleLabel: 'Light disc',
     langBtn: 'ENG',
-    placeholderStub: 'Uncovering the hidden…',
+    fieldLabel: 'Message:',
+    placeholderStub: 'The decoded message will appear here.',
     statusSearchingAnchors: 'Searching anchors...',
     statusStabilizing: 'Stabilizing geometry...',
     statusTooClose: 'Too close — move back a bit',
-    statusOffCenter: 'Keep the disc closer to the center of the frame',
     statusRawNoise: 'Raw noise, seeking pattern...',
     statusHubUnconfirmed: 'Geometry not confirmed, searching...',
     statusCandidate: (cur, total) => `Candidate (${cur}/${total})`,
@@ -433,11 +508,12 @@ function toggleLang(btn) {
 function applyLang() {
   const t = STR[CURRENT_LANG];
   document.getElementById('langToggle').textContent = t.langBtn;
+  document.getElementById('themeToggleLabel').textContent = t.themeToggleLabel;
+  document.getElementById('fieldLabel').textContent = t.fieldLabel;
   if (showingStub) setStub();
 }
 
 function setStub() {
-  revealToken++; // скасовує будь-яке незавершене друкування
   document.getElementById('msgText').textContent = STR[CURRENT_LANG].placeholderStub;
   document.getElementById('msgCursor').className = 'type-cursor idle';
   showingStub = true;
@@ -458,20 +534,7 @@ const RING_SECTORS       = [12, 12, 12, 12, 24, 24, 24, 36, 36, 36];
 const RING_SYMBOLS_COUNT = [ 1,  1,  1,  1,  2,  2,  2,  3,  3,  3];
 const TOTAL_SYMBOLS = RING_SYMBOLS_COUNT.reduce((a, b) => a + b, 0); // = 19
 
-/* 'dark'  = темний фон/світлі знаки, 'light' = світлий фон/темні знаки.
-   За замовчуванням тепер світлий диск. Візуального перемикача немає,
-   але тему можна змінити з коду через window.setDiscTheme('dark'|'light'). */
-let DISC_THEME = 'light';
-
-function setDiscTheme(theme) {
-  DISC_THEME = theme === 'dark' ? 'dark' : 'light';
-  scanHistory = [];
-  resetTracking();
-  lastTriangle = null;
-  targetRingProgress = 0;
-  ringProgress = 0;
-}
-window.setDiscTheme = setDiscTheme;
+let DISC_THEME = 'dark'; // 'dark' = темний фон/світлі знаки, 'light' = світлий фон/темні знаки
 
 const ANCHOR_ANGLES = [90, 270, 210, 330].map(d => d * Math.PI / 180); // низ, верх, ліво, право
 const SRC_BOTTOM = { x: CX + Math.cos(ANCHOR_ANGLES[0]) * ANCHOR_R, y: CY + Math.sin(ANCHOR_ANGLES[0]) * ANCHOR_R };
@@ -480,135 +543,38 @@ const SRC_LEFT   = { x: CX + Math.cos(ANCHOR_ANGLES[2]) * ANCHOR_R, y: CY + Math
 const SRC_RIGHT  = { x: CX + Math.cos(ANCHOR_ANGLES[3]) * ANCHOR_R, y: CY + Math.sin(ANCHOR_ANGLES[3]) * ANCHOR_R };
 
 /* ================================================================
-   ДЕКОДЕР (камера) — перенесено з кодера-сканера один в один.
+   ДЕКОДЕР (камера) — перенесено з кодера-сканера один в один,
+   лише статуси йдуть через STR[CURRENT_LANG] замість хардкоду.
    ================================================================ */
 
 const ANALYSIS_SIZE = 340;
-
-/* ================================================================
-   ШАБЛОН ФІКСОВАНИХ ЗОН ПОШУКУ (5 контрольних точок) — хаб (центр) і
-   4 якорі (низ/верх/ліво/право) на радіусі TEMPLATE_ANCHOR_R_PX під
-   тими самими кутами, що й ANCHOR_ANGLES. Користувач сам підлаштовує
-   диск (відстань до камери й поворот) під ці позиції — як прицілювання
-   під рамку QR-сканера. Це прибирає перебір комбінацій і пошук на 360°:
-   кожна зона вже відповідає конкретній ролі за своєю фіксованою позицією. */
-const TEMPLATE_CENTER = { x: ANALYSIS_SIZE / 2, y: ANALYSIS_SIZE / 2 };
-const TEMPLATE_ANCHOR_R_PX = 112;
-const TEMPLATE_ANCHORS = {
-  bottom: { x: TEMPLATE_CENTER.x + Math.cos(ANCHOR_ANGLES[0]) * TEMPLATE_ANCHOR_R_PX, y: TEMPLATE_CENTER.y + Math.sin(ANCHOR_ANGLES[0]) * TEMPLATE_ANCHOR_R_PX },
-  top:    { x: TEMPLATE_CENTER.x + Math.cos(ANCHOR_ANGLES[1]) * TEMPLATE_ANCHOR_R_PX, y: TEMPLATE_CENTER.y + Math.sin(ANCHOR_ANGLES[1]) * TEMPLATE_ANCHOR_R_PX },
-  left:   { x: TEMPLATE_CENTER.x + Math.cos(ANCHOR_ANGLES[2]) * TEMPLATE_ANCHOR_R_PX, y: TEMPLATE_CENTER.y + Math.sin(ANCHOR_ANGLES[2]) * TEMPLATE_ANCHOR_R_PX },
-  right:  { x: TEMPLATE_CENTER.x + Math.cos(ANCHOR_ANGLES[3]) * TEMPLATE_ANCHOR_R_PX, y: TEMPLATE_CENTER.y + Math.sin(ANCHOR_ANGLES[3]) * TEMPLATE_ANCHOR_R_PX },
-};
-
-// радіус вікна пошуку навколо кожної контрольної точки — запас на неточне
-// прицілювання, лишаючись малим, щоб не захопити сусідні деталі/шум паперу
-const ZONE_SEARCH_RADIUS_PX = 34;
-// мінімальна кількість "міток"-пікселів у зоні, щоб вважати її знайденою
-const ZONE_MIN_MARK_PIXELS = 18;
-
-let lastZoneResults = null; // останній результат пошуку 5 зон — для overlay в animateOverlay
 
 const analysisCanvas = document.createElement('canvas');
 analysisCanvas.width = ANALYSIS_SIZE;
 analysisCanvas.height = ANALYSIS_SIZE;
 const analysisCtx = analysisCanvas.getContext('2d', { willReadFrequently: true });
 
+const visitedBuf = new Uint8Array(ANALYSIS_SIZE * ANALYSIS_SIZE);
+const FLOOD_QUEUE_CAP = 4900;
+const floodQueueX = new Int32Array(FLOOD_QUEUE_CAP);
+const floodQueueY = new Int32Array(FLOOD_QUEUE_CAP);
+
 const MIN_TRIANGLE_SIDE_PX = 40;
 const MAX_TRIANGLE_SIDE_PX = 300;
 
-/* ----------------------------------------------------------------
-   ОТСУ-ПОРІГ, ОБМЕЖЕНИЙ НЕВЕЛИКИМ КОЛОМ. Універсальна функція — тепер
-   викликається окремо для кожної з 5 контрольних зон (findMarkInZone
-   нижче), а не один раз на весь кадр.
+const EXPECTED_ROTATION_RAD = Math.PI / 2;
+const MAX_ROTATION_DEVIATION_DEG = 40;
+const MAX_ROTATION_DEVIATION_RAD = (MAX_ROTATION_DEVIATION_DEG * Math.PI) / 180;
 
-   Раніше пошук якорів ішов через локальний адаптивний поріг (порівняння
-   з середньою яскравістю у вузькому вікні навколо кожного пікселя) —
-   його прибрано, бо він вимагав АБСОЛЮТНОЇ різниці яскравості мітка/фон.
-   На світлому кадрі (білий аркуш, екран) автоекспозиція камери стискає
-   контраст, і ця абсолютна різниця падає нижче порогу навіть при
-   чіткому чорнилі — пошук якорів ламався першим, ще до того, як справа
-   доходила до самого сканування.
-
-   Отсу натомість шукає ВІДНОСНИЙ розрив у гістограмі — межу між двома
-   "хмарами" значень (папір і чорнило), а не абсолютну відстань від
-   локального середнього. Навіть коли обидві хмари стиснуті ближче
-   одна до одної автоекспозицією, розрив між ними здебільшого лишається
-   знаходимим, доки чорнило й папір не злилися в одну хмару повністю.
-
-   Рахуємо Отсу лише в межах переданого радіусу навколо (cx, cy), а
-   не по всьому кадру 340×340, як THRESH нижче (для читання кілець) —
-   зайві пікселі поза зоною лише розмивають гістограму даремно й не
-   додають корисного сигналу. */
-function computeCircleOtsu(data, W, H, cx, cy, radius) {
-  const hist = new Uint32Array(256);
-  let sampleCount = 0;
-  const r2 = radius * radius;
-  const step = 2; // крок вибірки — досить густо для стабільної гістограми, але швидко
-  const y0 = Math.max(0, Math.round(cy - radius));
-  const y1 = Math.min(H, Math.round(cy + radius));
-  const x0 = Math.max(0, Math.round(cx - radius));
-  const x1 = Math.min(W, Math.round(cx + radius));
-  for (let y = y0; y < y1; y += step) {
-    const dy = y - cy;
-    for (let x = x0; x < x1; x += step) {
-      const dx = x - cx;
-      if (dx * dx + dy * dy > r2) continue;
-      const i = (y * W + x) * 4;
-      const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-      hist[Math.min(255, Math.max(0, Math.round(l)))]++;
-      sampleCount++;
-    }
-  }
-  if (sampleCount === 0) return 128;
-  let sumAll = 0;
-  for (let t = 0; t < 256; t++) sumAll += t * hist[t];
-  let sumB = 0, wB = 0, maxVar = 0, thresh = 128;
-  for (let t = 0; t < 256; t++) {
-    wB += hist[t];
-    if (wB === 0) continue;
-    const wF = sampleCount - wB;
-    if (wF === 0) break;
-    sumB += t * hist[t];
-    const mB = sumB / wB;
-    const mF = (sumAll - sumB) / wF;
-    const varBetween = wB * wF * (mB - mF) * (mB - mF);
-    if (varBetween > maxVar) { maxVar = varBetween; thresh = t; }
-  }
-  return thresh;
-}
-
-/* Шукає позицію мітки в межах невеликого вікна навколо однієї з 5
-   контрольних точок шаблону (targetX, targetY, radius). Рахує локальний
-   Отсу-поріг ЛИШЕ в цьому вікні (переви користовуючи computeCircleOtsu)
-   і повертає центроїд (середню позицію) усіх пікселів, що пройшли поріг
-   як "мітка". Повертає null, якщо мало пікселів пройшло поріг — зона
-   вважається "не знайденою" цього кадру. */
-function findMarkInZone(data, W, H, targetX, targetY, radius) {
-  const thresh = computeCircleOtsu(data, W, H, targetX, targetY, radius);
-  const r2 = radius * radius;
-  const x0 = Math.max(0, Math.round(targetX - radius));
-  const x1 = Math.min(W, Math.round(targetX + radius));
-  const y0 = Math.max(0, Math.round(targetY - radius));
-  const y1 = Math.min(H, Math.round(targetY + radius));
-
-  let sx = 0, sy = 0, cnt = 0;
-  for (let y = y0; y < y1; y++) {
-    const dy = y - targetY;
-    for (let x = x0; x < x1; x++) {
-      const dx = x - targetX;
-      if (dx * dx + dy * dy > r2) continue;
-      const i = (y * W + x) * 4;
-      const l = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-      const isMarkPixel = DISC_THEME === 'dark' ? l > thresh : l < thresh;
-      if (isMarkPixel) { sx += x; sy += y; cnt++; }
-    }
-  }
-  if (cnt < ZONE_MIN_MARK_PIXELS) return null;
-  return { x: sx / cnt, y: sy / cnt };
+function angleDiffRad(a, b) {
+  let diff = a - b;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  return diff;
 }
 
 const TRACKING_ENABLED = false;
+const TRACKING_SEARCH_RADIUS = 70;
 const TRACKING_LOST_AFTER = 5;
 let trackedCenter = null;
 let trackedMissCount = 0;
@@ -637,47 +603,12 @@ const CONFIRM_STREAK = 3;
 const LOCK_HOLD_MS = 550;
 const NOISE_MISMATCH_THRESHOLD = 28; // ~25% від загальної кількості дзеркальних пар (114 при 19 символах)
 
-/* скільки символів можуть відрізнятися між двома прочитаннями, щоб вони
-   все одно рахувались "тим самим" диском, а не скидали прогрес до нуля.
-   На папері один кадр з випадковим відблиском може дати 1-2 неправильні
-   символи навіть коли диск лежить нерухомо — раніше це прирівнювалось
-   до "інший диск" і обнуляло весь streak. Тепер такий кадр просто
-   приєднується до кластера, а не ламає його */
-const READING_MISMATCH_TOLERANCE = 2;
-
-const HISTORY_CAP = 6; // не даємо scanHistory рости необмежено, поки триває збіг
-
 let scanHistory = [];
 let locking = false;
 let camStream = null, scanTimer = null;
 let lockHoldTimeoutId = null;
 
 function dist(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2); }
-
-/* кількість позицій, де два прочитаних рядки відрізняються (з урахуванням
-   різної довжини — обрив на іншому END_INDEX теж рахується різницею) */
-function textDiffCount(a, b) {
-  let diff = Math.abs(a.length - b.length);
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    if (a[i] !== b[i]) diff++;
-  }
-  return diff;
-}
-
-/* найчастіший варіант серед накопичених кадрів кластера — фінальний
-   результат бере не обов'язково останній кадр, а "медіану" по кластеру,
-   що додатково гасить одиничний шум перед тим, як показати текст */
-function mostCommonReading(arr) {
-  const counts = new Map();
-  let best = arr[0], bestCount = 0;
-  for (const t of arr) {
-    const c = (counts.get(t) || 0) + 1;
-    counts.set(t, c);
-    if (c > bestCount) { bestCount = c; best = t; }
-  }
-  return best;
-}
 
 function solveLinearSystem(A, b) {
   const n = b.length;
@@ -716,31 +647,8 @@ function applyHomography(H, x, y) {
   return { x: (H.h11 * x + H.h12 * y + H.h13) / w, y: (H.h21 * x + H.h22 * y + H.h23) / w };
 }
 
-/* Малює 5 контрольних точок шаблону (хаб + 4 якорі) як постійний
-   орієнтир для прицілювання — сірим, якщо зона порожня цього кадру,
-   зеленим, якщо там щойно знайдено мітку. На відміну від lastTriangle
-   (з'являється лише коли геометрія вже зібрана), це малюється завжди,
-   поки триває сканування — саме на це користувач і наводить диск. */
-function drawTemplateGuide(displayCtx) {
-  const zones = [
-    TEMPLATE_ANCHORS.bottom, TEMPLATE_ANCHORS.top, TEMPLATE_ANCHORS.left, TEMPLATE_ANCHORS.right, TEMPLATE_CENTER
-  ];
-  const found = lastZoneResults
-    ? [lastZoneResults.bottom, lastZoneResults.top, lastZoneResults.left, lastZoneResults.right, lastZoneResults.hub]
-    : [null, null, null, null, null];
-
-  zones.forEach((pos, i) => {
-    displayCtx.strokeStyle = found[i] ? 'rgba(120,255,140,0.9)' : 'rgba(255,255,255,0.35)';
-    displayCtx.lineWidth = 2;
-    displayCtx.beginPath();
-    displayCtx.arc(pos.x, pos.y, ZONE_SEARCH_RADIUS_PX, 0, Math.PI * 2);
-    displayCtx.stroke();
-  });
-}
-
 function drawFocusTriangle(displayCtx, W, H) {
   displayCtx.clearRect(0, 0, W, H);
-  drawTemplateGuide(displayCtx);
   if (!lastTriangle) return;
 
   const vertices = lastTriangle;
@@ -787,11 +695,11 @@ async function startScan() {
     scanHistory = [];
     resetTracking();
     lastTriangle = null;
-    lastZoneResults = null;
     targetRingProgress = 0;
     ringProgress = 0;
     locking = false;
     document.getElementById('centerGuide').style.display = 'block';
+    logEvent(`сесія: старт, тема=${DISC_THEME}, мова=${CURRENT_LANG}`);
     setStatus(STR[CURRENT_LANG].statusSearchingAnchors);
     scanTimer = setInterval(scanFrame, 220);
     if (overlayAnimFrame) cancelAnimationFrame(overlayAnimFrame);
@@ -815,7 +723,6 @@ function teardownCamera() {
 
   resetTracking();
   lastTriangle = null;
-  lastZoneResults = null;
   targetRingProgress = 0;
   ringProgress = 0;
   locking = false;
@@ -830,11 +737,68 @@ function teardownCamera() {
 }
 
 function stopScan() {
+  logEvent('сесія: перервано вручну');
   teardownCamera();
 }
 
+function onThemeToggle() {
+  DISC_THEME = document.getElementById('themeToggle').checked ? 'light' : 'dark';
+  scanHistory = [];
+  resetTracking();
+  lastTriangle = null;
+  targetRingProgress = 0;
+  ringProgress = 0;
+  logEvent(`тема диска: ${DISC_THEME === 'dark' ? 'темний диск (світлі знаки)' : 'світлий диск (темні знаки)'}`);
+}
+
 function setStatus(text) {
-  document.getElementById('scanStatus').textContent = text;
+  const st = document.getElementById('scanStatus');
+  st.textContent = text;
+  logStatusChange(text);
+}
+
+/* ================================================================
+   ЛОГ ДЛЯ ДЕБАГУ
+   ================================================================ */
+const MAX_LOG_LINES = 600;
+let logLines = [];
+let lastLoggedStatus = null;
+
+function logTimestamp() {
+  const d = new Date();
+  return d.toTimeString().split(' ')[0] + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
+function logEvent(msg) {
+  logLines.push(`[${logTimestamp()}] ${msg}`);
+  if (logLines.length > MAX_LOG_LINES) logLines.shift();
+  renderLog();
+}
+function logStatusChange(text) {
+  if (text === lastLoggedStatus) return;
+  lastLoggedStatus = text;
+  logEvent('статус: ' + text);
+}
+function renderLog() {
+  const area = document.getElementById('logArea');
+  if (!area) return;
+  area.value = logLines.join('\n');
+  area.scrollTop = area.scrollHeight;
+}
+async function copyLog() {
+  const text = logLines.join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    const area = document.getElementById('logArea');
+    area.focus();
+    area.select();
+    try { document.execCommand('copy'); } catch (e2) {}
+  }
+}
+function clearLog() {
+  logLines = [];
+  lastLoggedStatus = null;
+  renderLog();
 }
 
 function scanFrame() {
@@ -892,60 +856,131 @@ function tryDecode() {
     const varBetween = wB * wF * (mB - mF) * (mB - mF);
     if (varBetween > maxVar) { maxVar = varBetween; THRESH = t; }
   }
-  // на яскравому/малоконтрастному фоні гістограма стає майже одномодальною,
-  // і Отсу-поріг може "тремтіти" від кадру до кадру. Просте змішування з
-  // попереднім калібруванням (lastGoodThresh) виявилось ризикованим: якщо
-  // перше калібрування невдале, воно із вагою 70% заражає всі наступні
-  // кадри до кінця сесії без жодного запобіжника — тому прибрано.
   function isMark(l) { return DISC_THEME === 'dark' ? l > THRESH : l < THRESH; }
 
-  /* ================================================================
-     ПОШУК ЗА ФІКСОВАНОЮ ГЕОМЕТРІЄЮ (5 контрольних зон) замість пошуку
-     "будь-де" в колі прицілу з подальшим перебором комбінацій.
+  let searchX0 = 6, searchX1 = W - 6, searchY0 = 6, searchY1 = H - 6;
+  if (TRACKING_ENABLED && trackedCenter) {
+    searchX0 = Math.max(6, trackedCenter.x - TRACKING_SEARCH_RADIUS);
+    searchX1 = Math.min(W - 6, trackedCenter.x + TRACKING_SEARCH_RADIUS);
+    searchY0 = Math.max(6, trackedCenter.y - TRACKING_SEARCH_RADIUS);
+    searchY1 = Math.min(H - 6, trackedCenter.y + TRACKING_SEARCH_RADIUS);
+  }
 
-     Раніше: збирали всі темні/світлі плями в межах кола прицілу, потім
-     перебирали комбінації по 4 з них, підбираючи ту, що найкраще
-     збігається з очікуваною формою ромба. Шум текстури паперу засмічував
-     пул кандидатів, і толерантність форми доводилось постійно послаблювати.
+  const markBlobs = [];
+  visitedBuf.fill(0);
+  const visited = visitedBuf;
 
-     Тепер: геометрія диска відома заздалегідь (кути й відносні відстані
-     фіксовані), тож шукаємо мітку в 5 конкретних невеликих зонах навколо
-     очікуваних екранних позицій (TEMPLATE_CENTER/TEMPLATE_ANCHORS вище).
-     Користувач сам підлаштовує диск під ці позиції. Жодного перебору —
-     кожна зона вже відповідає конкретній ролі (низ/верх/ліво/право) за
-     своєю фіксованою позицією, а не за формою знайденого чотирикутника. */
+  for (let y = searchY0; y < searchY1; y += 4) {
+    for (let x = searchX0; x < searchX1; x += 4) {
+      if (isMark(lum(x, y)) && !visited[y * W + x]) {
+        floodQueueX[0] = x; floodQueueY[0] = y;
+        let qHead = 0, qTail = 1;
+        let sx = 0, sy = 0, cnt = 0;
+        let minPX = Infinity, maxPX = -Infinity, minPY = Infinity, maxPY = -Infinity;
+        while (qHead < qTail && cnt < 1200) {
+          const px = floodQueueX[qHead], py = floodQueueY[qHead];
+          qHead++;
+          if (px < 0 || px >= W || py < 0 || py >= H || visited[py * W + px] || !isMark(lum(px, py))) continue;
+          visited[py * W + px] = 1;
+          sx += px; sy += py; cnt++;
+          if (px < minPX) minPX = px;
+          if (px > maxPX) maxPX = px;
+          if (py < minPY) minPY = py;
+          if (py > maxPY) maxPY = py;
+          if (qTail + 4 <= floodQueueX.length) {
+            floodQueueX[qTail] = px + 4; floodQueueY[qTail] = py; qTail++;
+            floodQueueX[qTail] = px - 4; floodQueueY[qTail] = py; qTail++;
+            floodQueueX[qTail] = px; floodQueueY[qTail] = py + 4; qTail++;
+            floodQueueX[qTail] = px; floodQueueY[qTail] = py - 4; qTail++;
+          }
+        }
+        if (cnt > 6 && cnt < 1200) {
+          const bboxW = maxPX - minPX + 4;
+          const bboxH = maxPY - minPY + 4;
+          const fillRatio = (cnt * 16) / (bboxW * bboxH);
+          const aspect = Math.max(bboxW, bboxH) / Math.min(bboxW, bboxH);
+          if (fillRatio >= 0.5 && aspect <= 1.7) {
+            markBlobs.push({ x: sx / cnt, y: sy / cnt, size: cnt });
+          }
+        }
+      }
+    }
+  }
 
-  const foundHub    = findMarkInZone(data, W, H, TEMPLATE_CENTER.x, TEMPLATE_CENTER.y, ZONE_SEARCH_RADIUS_PX);
-  const foundBottom = findMarkInZone(data, W, H, TEMPLATE_ANCHORS.bottom.x, TEMPLATE_ANCHORS.bottom.y, ZONE_SEARCH_RADIUS_PX);
-  const foundTop    = findMarkInZone(data, W, H, TEMPLATE_ANCHORS.top.x, TEMPLATE_ANCHORS.top.y, ZONE_SEARCH_RADIUS_PX);
-  const foundLeft   = findMarkInZone(data, W, H, TEMPLATE_ANCHORS.left.x, TEMPLATE_ANCHORS.left.y, ZONE_SEARCH_RADIUS_PX);
-  const foundRight  = findMarkInZone(data, W, H, TEMPLATE_ANCHORS.right.x, TEMPLATE_ANCHORS.right.y, ZONE_SEARCH_RADIUS_PX);
-
-  // зберігаємо результат для animateOverlay (окремий rAF-цикл) — щоб
-  // підсвічувати знайдені/незнайдені зони одразу, а не чекати наступного
-  // виклику tryDecode
-  lastZoneResults = { hub: foundHub, bottom: foundBottom, top: foundTop, left: foundLeft, right: foundRight };
-  const zonesFoundCount = [foundHub, foundBottom, foundTop, foundLeft, foundRight].filter(Boolean).length;
-
-  if (!foundBottom || !foundTop || !foundLeft || !foundRight) {
+  markBlobs.sort((a, b) => b.size - a.size);
+  if (markBlobs.length < 4) {
     handleTrackingMiss();
     lastTriangle = null;
-    setStatus(STR[CURRENT_LANG].statusSearchingAnchors + ` [зон: ${zonesFoundCount}/5]`);
+    setStatus(STR[CURRENT_LANG].statusSearchingAnchors);
     return;
   }
 
-  const bottomAnchor = foundBottom, topAnchor = foundTop, leftAnchor = foundLeft, rightAnchor = foundRight;
+  const EXP_DIAG = 2 * ANCHOR_R;
+  const EXP_LONG_SIDE = ANCHOR_R * Math.sqrt(3);
+  const EXP_SHORT_SIDE = ANCHOR_R;
+  const QUAD_SHAPE_TOLERANCE = 0.35;
 
-  // грубий запобіжник від випадкового шуму — не основна перевірка форми
-  // (її більше нема), радше "диск явно занадто близько/далеко від камери"
-  const dDiag = dist(bottomAnchor, topAnchor);
-  if (dDiag > MAX_TRIANGLE_SIDE_PX * 1.3 || dDiag < MIN_TRIANGLE_SIDE_PX * 1.3) {
+  const candidates = markBlobs.slice(0, Math.min(12, markBlobs.length));
+  let bestQuad = null, bestScore = Infinity;
+  let sawOversized = false;
+
+  for (let i0 = 0; i0 < candidates.length; i0++) {
+    for (let i1 = i0 + 1; i1 < candidates.length; i1++) {
+      for (let i2 = i1 + 1; i2 < candidates.length; i2++) {
+        for (let i3 = i2 + 1; i3 < candidates.length; i3++) {
+          const pts = [candidates[i0], candidates[i1], candidates[i2], candidates[i3]];
+
+          let bottom = pts[0], top = pts[0];
+          for (const p of pts) {
+            if (p.y > bottom.y) bottom = p;
+            if (p.y < top.y) top = p;
+          }
+          if (bottom === top) continue;
+          const rest = pts.filter(p => p !== bottom && p !== top);
+          if (rest.length !== 2) continue;
+          const left = rest[0].x <= rest[1].x ? rest[0] : rest[1];
+          const right = rest[0].x <= rest[1].x ? rest[1] : rest[0];
+
+          const dDiag = dist(bottom, top);
+          if (dDiag > MAX_TRIANGLE_SIDE_PX * 1.3) { sawOversized = true; continue; }
+          if (dDiag < MIN_TRIANGLE_SIDE_PX * 1.3) continue;
+
+          const scale = dDiag / EXP_DIAG;
+          function relErr(measured, expected) {
+            const e = expected * scale;
+            return Math.abs(measured - e) / e;
+          }
+          const errs = [
+            relErr(dist(bottom, left), EXP_LONG_SIDE),
+            relErr(dist(bottom, right), EXP_LONG_SIDE),
+            relErr(dist(left, right), EXP_LONG_SIDE),
+            relErr(dist(top, left), EXP_SHORT_SIDE),
+            relErr(dist(top, right), EXP_SHORT_SIDE),
+          ];
+          const maxErr = Math.max(...errs);
+          if (maxErr > QUAD_SHAPE_TOLERANCE) continue;
+
+          const cx4 = (bottom.x + top.x + left.x + right.x) / 4;
+          const cy4 = (bottom.y + top.y + left.y + right.y) / 4;
+          const candRotation = Math.atan2(bottom.y - cy4, bottom.x - cx4);
+          const deviation = Math.abs(angleDiffRad(candRotation, EXPECTED_ROTATION_RAD));
+          if (deviation > MAX_ROTATION_DEVIATION_RAD) continue;
+
+          const score = errs.reduce((a, b) => a + b, 0);
+          if (score < bestScore) { bestScore = score; bestQuad = { bottom, top, left, right }; }
+        }
+      }
+    }
+  }
+
+  if (!bestQuad) {
     handleTrackingMiss();
     lastTriangle = null;
-    setStatus(STR[CURRENT_LANG].statusTooClose + ` [зон: ${zonesFoundCount}/5]`);
+    setStatus(sawOversized ? STR[CURRENT_LANG].statusTooClose : STR[CURRENT_LANG].statusStabilizing);
     return;
   }
 
+  const { bottom: bottomAnchor, top: topAnchor, left: leftAnchor, right: rightAnchor } = bestQuad;
   const cx = (bottomAnchor.x + topAnchor.x + leftAnchor.x + rightAnchor.x) / 4;
   const cy = (bottomAnchor.y + topAnchor.y + leftAnchor.y + rightAnchor.y) / 4;
   handleTrackingHit(cx, cy);
@@ -957,14 +992,18 @@ function tryDecode() {
     [bottomAnchor, topAnchor, leftAnchor, rightAnchor]
   );
 
-  // хаб — додаткове підтвердження, не потрібне для самої гомографії
-  // (яка будується лише з 4 якорів), але якщо зона хаба порожня, це
-  // підозріло: диск, найімовірніше, лежить неправильно чи зсунутий
-  if (!foundHub) {
+  const predictedHub = applyHomography(transform, CX, CY);
+  const hubScaleEstimate = dist(bottomAnchor, topAnchor) / (2 * ANCHOR_R);
+  const HUB_CHECK_TOLERANCE_PX = Math.max(12, hubScaleEstimate * HUB_R * 1.3);
+  let hubOk = false;
+  for (const b of markBlobs) {
+    if (dist(b, predictedHub) < HUB_CHECK_TOLERANCE_PX) { hubOk = true; break; }
+  }
+  if (!hubOk) {
     handleTrackingMiss();
     scanHistory = [];
     targetRingProgress = 0;
-    setStatus(STR[CURRENT_LANG].statusHubUnconfirmed + ` [зон: ${zonesFoundCount}/5]`);
+    setStatus(STR[CURRENT_LANG].statusHubUnconfirmed);
     return;
   }
 
@@ -977,6 +1016,8 @@ function tryDecode() {
   const MIN_CALIBRATION_SEPARATION = 15;
   if (Math.abs(fgLum - bgLum) >= MIN_CALIBRATION_SEPARATION) {
     THRESH = (fgLum + bgLum) / 2;
+  } else {
+    logEvent(`калібрування диска ненадійне (fg=${fgLum.toFixed(0)} bg=${bgLum.toFixed(0)}), лишаю Оцу`);
   }
 
   // --- зчитування кілець (змінна кількість секторів і символів) ---
@@ -1031,41 +1072,23 @@ function tryDecode() {
   registerReading(text, totalMismatches, invalidRings);
 }
 
-/* ================================================================
-   ПІДТВЕРДЖЕННЯ РЕЗУЛЬТАТУ — толерантне до одиничного шуму.
-   Раніше вимагалось трьох ІДЕНТИЧНИХ рядків поспіль; на друкованому
-   папері один зашумлений кадр (відблиск, тремтіння руки) майже завжди
-   давав хоч одну відмінність і обнуляв весь прогрес — звідси відчуття
-   "найменший рух все скидає". Тепер: зашумлений кадр (мало не пройшов
-   NOISE_MISMATCH_THRESHOLD/invalidRings) просто ігнорується без скидання
-   прогресу, а "інший, але схожий" результат (до READING_MISMATCH_TOLERANCE
-   символів різниці) приєднується до того самого кластера замість того,
-   щоб почати його заново. Фінальний текст — найчастіший варіант у
-   кластері, а не обов'язково останній кадр.
-   ================================================================ */
 function registerReading(text, mismatches, invalidRings) {
   if (locking) return;
 
   if (mismatches > NOISE_MISMATCH_THRESHOLD || invalidRings > 0) {
-    // одиничний явно зашумлений кадр більше не скидає накопичений
-    // прогрес — просто пропускаємо його і чекаємо наступний
+    logEvent(`read: ШУМ mismatches=${mismatches} invalid=${invalidRings} (поріг ${NOISE_MISMATCH_THRESHOLD})`);
+    scanHistory = [];
+    targetRingProgress = 0;
     setStatus(STR[CURRENT_LANG].statusRawNoise);
     return;
   }
 
-  if (scanHistory.length === 0) {
-    scanHistory = [text];
+  logEvent(`read: "${text || '(порожньо)'}" mismatches=${mismatches}`);
+
+  if (scanHistory.length && scanHistory[scanHistory.length - 1] === text) {
+    scanHistory.push(text);
   } else {
-    const reference = scanHistory[scanHistory.length - 1];
-    const diff = textDiffCount(text, reference);
-    if (diff <= READING_MISMATCH_TOLERANCE) {
-      scanHistory.push(text);
-      if (scanHistory.length > HISTORY_CAP) scanHistory.shift();
-    } else {
-      // це вже справді інший результат (інший диск або сильний шум) —
-      // тільки тепер починаємо кластер заново
-      scanHistory = [text];
-    }
+    scanHistory = [text];
   }
 
   targetRingProgress = Math.min(scanHistory.length, CONFIRM_STREAK);
@@ -1073,8 +1096,7 @@ function registerReading(text, mismatches, invalidRings) {
 
   if (scanHistory.length >= CONFIRM_STREAK && !locking) {
     locking = true;
-    const finalText = mostCommonReading(scanHistory);
-    lockHoldTimeoutId = setTimeout(() => finishScan(finalText), LOCK_HOLD_MS);
+    lockHoldTimeoutId = setTimeout(() => finishScan(text, mismatches), LOCK_HOLD_MS);
   }
 }
 
@@ -1082,7 +1104,8 @@ function registerReading(text, mismatches, invalidRings) {
    око заплющується, а розшифрований текст друкується внизу замість
    заглушки. Нічого нікуди не зберігається — наступне сканування
    просто перезапише це поле заново. */
-function finishScan(text) {
+function finishScan(text, mismatches) {
+  logEvent(`LOCK: "${text}" mismatches=${mismatches}`);
   teardownCamera();
   revealMessage(text || '(порожньо)');
   document.getElementById('accordion').classList.remove('state-down');
@@ -1093,7 +1116,6 @@ function finishScan(text) {
 function onDownArrow() {
   const accordion = document.getElementById('accordion');
   if (accordion.classList.contains('state-down')) return; // вже відкрито/сканується
-  setStub(); // прибираємо будь-яке попереднє розпізнане послання
   accordion.classList.add('state-down');
   startScan();
 }
@@ -1101,39 +1123,32 @@ function onDownArrow() {
 /* стрілка вгору під час сканування — перериває без результату й повертає все назад */
 function onUpArrow() {
   stopScan();
-  setStub(); // прибираємо будь-яке попереднє розпізнане послання
   document.getElementById('accordion').classList.remove('state-down');
 }
 
 /* ===== ВИВІД / ДРУКАРСЬКА МАШИНКА (одне поле — саме послання) ===== */
 
 const ACCORDION_TRANSITION_MS = 2200; // збігається з CSS transition роздільника
-const TYPE_SPEED_MS = 500;      // базовий інтервал між символами — «людський» темп
-const TYPE_SPEED_JITTER_MS = 220; // випадковий розкид навколо базового інтервалу
+const TYPE_SPEED_MS = 40;
 
 let revealToken = 0;
 
-/* друкує по символу з випадковим інтервалом навколо TYPE_SPEED_MS,
-   щоб виглядало як людський набір тексту, а не рівномірний метроном */
-function typeInto(elId, cursorId, text, myToken) {
+function typeInto(elId, cursorId, text, speed, myToken) {
   return new Promise((resolve) => {
     const el = document.getElementById(elId);
     const cursor = document.getElementById(cursorId);
     if (!el) { resolve(); return; }
     let i = 0;
-    function typeNext() {
-      if (myToken !== revealToken) { resolve(); return; }
-      if (i >= text.length) {
-        if (cursor) cursor.classList.add('done');
-        resolve();
-        return;
-      }
+    const timer = setInterval(() => {
+      if (myToken !== revealToken) { clearInterval(timer); resolve(); return; }
       el.textContent += text[i];
       i++;
-      const delay = TYPE_SPEED_MS + (Math.random() * 2 - 1) * TYPE_SPEED_JITTER_MS;
-      setTimeout(typeNext, Math.max(150, delay));
-    }
-    typeNext();
+      if (i >= text.length) {
+        clearInterval(timer);
+        if (cursor) cursor.classList.add('done');
+        resolve();
+      }
+    }, speed);
   });
 }
 
@@ -1156,7 +1171,7 @@ async function revealMessage(text) {
   await pause(ACCORDION_TRANSITION_MS);
   if (myToken !== revealToken) return;
 
-  await typeInto('msgText', 'msgCursor', text, myToken);
+  await typeInto('msgText', 'msgCursor', text, TYPE_SPEED_MS, myToken);
 }
 
 /* ===== ІНІЦІАЛІЗАЦІЯ ===== */
