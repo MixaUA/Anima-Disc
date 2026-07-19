@@ -109,6 +109,7 @@ textarea { width: 100%; height: 180px; font-family: monospace; font-size: 11px; 
   </div>
 </div>
 
+<script src="opencv.js"></script>
 <script>
 /* ================================================================
    ГЕОМЕТРІЯ ДИСКА — 5 орбіт, маяки на середній (індекс 2)
@@ -432,13 +433,15 @@ function getLocalAnchors() {
 }
 
 /* ================================================================
-   БЛОБ-ДЕТЕКЦІЯ — перенесено без змін з "Ромб-вишиванка"
+   ПОШУК КАНДИДАТІВ — OpenCV.js (adaptiveThreshold + findContours)
+   замість власного flood-fill з глобальним порогом. Це саме те, що
+   мало вирішити хронічну проблему з нерівномірним освітленням: поріг
+   тепер рахується ЛОКАЛЬНО для кожної ділянки кадру (adaptiveThreshold),
+   а не один поріг на весь кадр. Перевірка "чи це справжній маяк"
+   (ringRatioCheck) лишається нашою — OpenCV не знає, що таке наш
+   маркер, він лише дає надійніші необроблені кандидати.
    ================================================================ */
-const MIN_BLOB_SIZE = 3;
-const MAX_BLOB_SIZE = 900;
-const FLOOD_CAP = 3000;
 const DARK_THRESHOLD_RATIO = 0.68;
-
 function computeAdaptiveDarkThreshold(imgData) {
   const data = imgData.data;
   let total = 0, count = 0;
@@ -449,85 +452,40 @@ function computeAdaptiveDarkThreshold(imgData) {
   const avgLum = count > 0 ? total / count : 128;
   return avgLum * DARK_THRESHOLD_RATIO;
 }
-function isDark(lum, threshold) { return lum < threshold; }
 
-function isIsolatedOnBackground(data, W, H, minX, maxX, minY, maxY, threshold) {
-  const haloR = 5;
-  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-  const rx = (maxX - minX) / 2 + haloR, ry = (maxY - minY) / 2 + haloR;
-  const SAMPLES = 12;
-  let lightCount = 0, total = 0;
-  for (let i = 0; i < SAMPLES; i++) {
-    const ang = (i / SAMPLES) * Math.PI * 2;
-    const px = Math.round(cx + Math.cos(ang) * rx);
-    const py = Math.round(cy + Math.sin(ang) * ry);
-    if (px < 0 || px >= W || py < 0 || py >= H) continue;
-    const idx = (py * W + px) * 4;
-    const l = data[idx] * 0.299 + data[idx + 1] * 0.587 + data[idx + 2] * 0.114;
-    total++;
-    if (!isDark(l, threshold)) lightCount++;
-  }
-  return total > 0 && (lightCount / total) >= 0.6;
-}
+const CV_MIN_CONTOUR_AREA = 5;
+const CV_MAX_CONTOUR_AREA = 2000;
 
-function findDarkBlobs(imgData, W, H, step, threshold, searchBounds) {
-  const data = imgData.data;
-  const visited = new Uint8Array(W * H);
-  const qx = new Int32Array(FLOOD_CAP);
-  const qy = new Int32Array(FLOOD_CAP);
+function findCandidatesCV(imgDataLike, W, H) {
+  const src = cv.matFromImageData(imgDataLike);
+  const gray = new cv.Mat();
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  const blurred = new cv.Mat();
+  cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 1.0);
+  const binary = new cv.Mat();
+  // blockSize=25, C=8 — підібрано на симуляціях; локальний поріг у вікні
+  // 25px, з поправкою -8, щоб не ловити м'який шум як межу.
+  cv.adaptiveThreshold(blurred, binary, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 25, 8);
+  const contours = new cv.MatVector();
+  const hierarchy = new cv.Mat();
+  cv.findContours(binary, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+
   const blobs = [];
-  let rejectedCapped = 0, rejectedTooBig = 0;
-
-  const x0 = searchBounds ? Math.max(0, Math.round(searchBounds.minX)) : 0;
-  const x1 = searchBounds ? Math.min(W, Math.round(searchBounds.maxX)) : W;
-  const y0 = searchBounds ? Math.max(0, Math.round(searchBounds.minY)) : 0;
-  const y1 = searchBounds ? Math.min(H, Math.round(searchBounds.maxY)) : H;
-
-  function lumAt(x, y) {
-    const i = (y * W + x) * 4;
-    return data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-  }
-
-  for (let y = y0; y < y1; y += step) {
-    for (let x = x0; x < x1; x += step) {
-      if (visited[y * W + x]) continue;
-      if (!isDark(lumAt(x, y), threshold)) continue;
-      qx[0] = x; qy[0] = y;
-      let head = 0, tail = 1;
-      let sx = 0, sy = 0, cnt = 0;
-      let minX = x, maxX = x, minY = y, maxY = y;
-      visited[y * W + x] = 1;
-      while (head < tail && cnt < FLOOD_CAP) {
-        const cx = qx[head], cy = qy[head]; head++;
-        sx += cx; sy += cy; cnt++;
-        if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
-        if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
-        const neighbors = [[cx+1,cy],[cx-1,cy],[cx,cy+1],[cx,cy-1]];
-        for (const [nx, ny] of neighbors) {
-          if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
-          if (visited[ny * W + nx]) continue;
-          if (!isDark(lumAt(nx, ny), threshold)) continue;
-          visited[ny * W + nx] = 1;
-          if (tail < FLOOD_CAP) { qx[tail] = nx; qy[tail] = ny; tail++; }
-        }
-      }
-      if (cnt < MIN_BLOB_SIZE) continue;
-      if (cnt >= FLOOD_CAP) { rejectedCapped++; continue; }
-      if (cnt > MAX_BLOB_SIZE) { rejectedTooBig++; continue; }
-
-      const bboxW = maxX - minX + 1, bboxH = maxY - minY + 1;
-      // Фільтр форми (aspect/fillRatio) я прибрав звідси — кільце-маяк і
-      // випадкові дугові плями обидва мають "неправильну" заповненість за
-      // різних причин, тож справжня перевірка тепер — радіальний профіль
-      // (ringRatioCheck нижче), а не форма самої плями.
-
-      if (!isIsolatedOnBackground(data, W, H, minX, maxX, minY, maxY, threshold)) continue;
-      blobs.push({ x: sx / cnt, y: sy / cnt, size: cnt, bboxW, bboxH });
+  for (let i = 0; i < contours.size(); i++) {
+    const cnt = contours.get(i);
+    const area = cv.contourArea(cnt);
+    if (area >= CV_MIN_CONTOUR_AREA && area <= CV_MAX_CONTOUR_AREA) {
+      const rect = cv.boundingRect(cnt);
+      const m = cv.moments(cnt, false);
+      let cx, cy;
+      if (m.m00 !== 0) { cx = m.m10 / m.m00; cy = m.m01 / m.m00; }
+      else { cx = rect.x + rect.width / 2; cy = rect.y + rect.height / 2; }
+      blobs.push({ x: cx, y: cy, bboxW: rect.width, bboxH: rect.height });
     }
+    cnt.delete();
   }
-  if (rejectedCapped || rejectedTooBig) {
-    log(`Блоб-фільтр: відхилено ${rejectedCapped} "безмежних", ${rejectedTooBig} завеликих плям.`);
-  }
+  // WASM-пам'ять не прибирається сама — обов'язково звільняємо після кожного кадру
+  src.delete(); gray.delete(); blurred.delete(); binary.delete(); contours.delete(); hierarchy.delete();
   return blobs;
 }
 
@@ -770,16 +728,14 @@ function firstSymbolIsStart(sections) {
    ================================================================ */
 function detectAndDecode(imgData, W, H) {
   const threshold = computeAdaptiveDarkThreshold(imgData);
-  const blobs = findDarkBlobs(imgData, W, H, 3, threshold, trackedBounds);
+  const blobs = findCandidatesCV(imgData, W, H);
 
   if (blobs.length < 4) {
-    trackingMiss();
-    return { ok: false, reason: `замало плям (${blobs.length}, треба 4)${trackedBounds ? ' [звужена зона]' : ''}`, blobCount: blobs.length };
+    return { ok: false, reason: `замало плям (${blobs.length}, треба 4)`, blobCount: blobs.length };
   }
 
   const verified = findVerifiedAnchors(imgData, W, H, blobs, threshold);
   if (verified.length < 4) {
-    trackingMiss();
     return { ok: false, reason: `плям=${blobs.length}, підтверджених бичачих очей=${verified.length} (треба 4)`, blobCount: blobs.length };
   }
 
@@ -792,12 +748,11 @@ function detectAndDecode(imgData, W, H) {
   } else {
     // Більше 4 (рідко — хибне підтвердження десь-інде): перебираємо
     // комбінації, але лише серед уже верифікованих точок (набагато
-    // менший і чистіший пул, ніж топ-10 будь-яких темних плям).
+    // менший і чистіший пул, ніж усі контури кадру).
     quads = findPlausibleQuads(verified, maxDiagPx);
   }
 
   if (quads.length === 0) {
-    trackingMiss();
     return { ok: false, reason: `${verified.length} підтверджених очей, не утворюють квадрат`, blobCount: blobs.length };
   }
 
@@ -825,49 +780,22 @@ function detectAndDecode(imgData, W, H) {
   }
 
   const bestSides = [dist(best.dstCyclic[0],best.dstCyclic[1]), dist(best.dstCyclic[1],best.dstCyclic[2]), dist(best.dstCyclic[2],best.dstCyclic[3]), dist(best.dstCyclic[3],best.dstCyclic[0])];
-  log(`Якір: плям=${blobs.length}, підтв.очей=${verified.length}, чотирикутників=${quads.length}, сторони=[${bestSides.map(s=>s.toFixed(0)).join(',')}], чексума=${(best.agreement*100).toFixed(1)}%, старт-символ=${best.startOk ? 'OK' : 'ні'}.`);
+  log(`Якір: контурів=${blobs.length}, підтв.очей=${verified.length}, чотирикутників=${quads.length}, сторони=[${bestSides.map(s=>s.toFixed(0)).join(',')}], чексума=${(best.agreement*100).toFixed(1)}%, старт-символ=${best.startOk ? 'OK' : 'ні'}.`);
 
-  updateTrackedBounds(best.dstCyclic, W, H);
   return { ok: true, blobCount: blobs.length, candidateCount: verified.length, quadCount: quads.length, best };
 }
 
 /* ================================================================
-   ТРЕКІНГ ЗОНИ ПОШУКУ + СТАБІЛЬНІСТЬ (перенесено з ромба)
+   СТАБІЛЬНІСТЬ: кілька кадрів поспіль з близькою чексумою й близькими
+   координатами центроїда якорів, перш ніж фіксувати результат.
    ================================================================ */
-let trackedBounds = null;
-let trackedMissCount = 0;
-const TRACK_PADDING_FACTOR = 0.6;
-const TRACK_LOST_AFTER = 6;
-
-function resetTrackedBounds() { trackedBounds = null; trackedMissCount = 0; }
-function updateTrackedBounds(pts, W, H) {
-  let minX = pts[0].x, maxX = pts[0].x, minY = pts[0].y, maxY = pts[0].y;
-  for (const p of pts) {
-    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
-    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
-  }
-  const w = maxX - minX, h = maxY - minY;
-  const padX = Math.max(30, w * TRACK_PADDING_FACTOR);
-  const padY = Math.max(30, h * TRACK_PADDING_FACTOR);
-  trackedBounds = {
-    minX: Math.max(0, minX - padX), maxX: Math.min(W, maxX + padX),
-    minY: Math.max(0, minY - padY), maxY: Math.min(H, maxY + padY)
-  };
-  trackedMissCount = 0;
-}
-function trackingMiss() {
-  if (!trackedBounds) return;
-  trackedMissCount++;
-  if (trackedMissCount >= TRACK_LOST_AFTER) resetTrackedBounds();
-}
-
 const CONFIRM_STREAK = 3;
 const MIN_AGREEMENT = 0.85;
 const STABILITY_TOL_PX = 14;
 let recentCentroids = [];
 let recentTexts = [];
 function centroidOf(pts) { return { x: pts.reduce((s,p)=>s+p.x,0)/pts.length, y: pts.reduce((s,p)=>s+p.y,0)/pts.length }; }
-function resetStability() { recentCentroids = []; recentTexts = []; resetTrackedBounds(); }
+function resetStability() { recentCentroids = []; recentTexts = []; }
 function checkStability(centroid, text) {
   recentCentroids.push(centroid);
   recentTexts.push(text);
@@ -888,8 +816,39 @@ function checkStability(centroid, text) {
 let camStream = null;
 let scanTimer = null;
 let locked = false;
+let cvReady = false;
+
+/* opencv.js вантажиться асинхронно (WASM). Поки не готово — камера
+   заблокована, щоб не впасти на виклику cv.matFromImageData тощо. */
+(function initOpenCV() {
+  const btn = document.getElementById('camToggleBtn');
+  const status = document.getElementById('camStatus');
+  btn.disabled = true;
+  status.textContent = 'Завантаження OpenCV...';
+  if (window.cv && typeof window.cv.then === 'function') {
+    window.cv.then((resolvedCv) => {
+      window.cv = resolvedCv; // деякі частини коду звертаються до глобального cv напряму
+      cvReady = true;
+      btn.disabled = false;
+      status.textContent = 'OpenCV завантажено. Готово до сканування.';
+      log('OpenCV.js ініціалізовано.');
+    }).catch((e) => {
+      status.textContent = 'Помилка завантаження OpenCV: ' + e;
+      log('ПОМИЛКА ініціалізації OpenCV: ' + e);
+    });
+  } else if (window.cv && window.cv.Mat) {
+    // на випадок збірки, що вже готова синхронно
+    cvReady = true;
+    btn.disabled = false;
+    status.textContent = 'OpenCV завантажено. Готово до сканування.';
+  } else {
+    status.textContent = 'Не вдалося знайти opencv.js поруч з файлом.';
+    log('ПОМИЛКА: window.cv відсутній — перевір, що opencv.js лежить поруч у тій самій папці.');
+  }
+})();
 
 async function toggleCamera() {
+  if (!cvReady) return;
   const btn = document.getElementById('camToggleBtn');
   if (camStream) { stopCamera(); btn.textContent = 'Увімкнути камеру'; return; }
   const status = document.getElementById('camStatus');
