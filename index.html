@@ -137,6 +137,14 @@ function log(msg) {
 }
 log('Скрипт завантажено і виконується.');
 
+window.addEventListener('error', (e) => {
+  log(`ГЛОБАЛЬНА ПОМИЛКА: ${e.message} (${e.filename}:${e.lineno}:${e.colno})\n${e.error && e.error.stack ? e.error.stack : ''}`);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  log(`НЕОБРОБЛЕНИЙ REJECT: ${e.reason && e.reason.message ? e.reason.message : e.reason}`);
+});
+log(`UA: ${navigator.userAgent}`);
+
 // ===== Полібій 6x6 =====
 const LETTERS = ['а','б','в','г','ґ','д','е','є','ж','з','и','і','ї','й','к','л','м','н','о','п','р','с','т','у','ф','х','ц','ч','ш','щ','ь','ю','я'];
 const SYMBOLS = [' ', ',', '.'];
@@ -885,16 +893,24 @@ async function toggleCamera() {
   const btn = document.getElementById('camToggleBtn');
   if (camStream) { stopCamera(); btn.textContent = 'Увімкнути камеру'; return; }
   const status = document.getElementById('camStatus');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    log('ПОМИЛКА: navigator.mediaDevices.getUserMedia недоступний у цьому контексті (потрібен HTTPS або localhost).');
+    status.textContent = 'Камера недоступна в цьому браузері/контексті (потрібен HTTPS).';
+    return;
+  }
   log('Запит доступу до камери...');
   try {
     camStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: 'environment' }, width: { ideal: 720 }, height: { ideal: 720 } }
     });
+    const track = camStream.getVideoTracks()[0];
+    const settings = track && track.getSettings ? track.getSettings() : {};
+    log(`Дозвіл на камеру отримано. Трек: ${track ? track.label : '?'}, налаштування: ${JSON.stringify(settings)}`);
     const video = document.getElementById('camVideo');
     video.srcObject = camStream;
     await new Promise((resolve) => { if (video.readyState >= 1) { resolve(); return; } video.onloadedmetadata = () => resolve(); });
     await video.play();
-    log(`Відео грає. ${video.videoWidth}x${video.videoHeight}`);
+    log(`Відео грає. Роздільність відео: ${video.videoWidth}x${video.videoHeight}. Розмір блоку камери на екрані: ${document.getElementById('camWrap').clientWidth}x${document.getElementById('camWrap').clientHeight}px (саме такий розмір кадру буде захоплюватись для аналізу).`);
     document.getElementById('camPlaceholder').style.display = 'none';
     document.getElementById('camLive').classList.add('active');
     document.getElementById('centerGuide').classList.add('active');
@@ -977,60 +993,82 @@ function bitsToPhraseFrom(arr) {
   return out;
 }
 
+let scanFrameCount = 0;
+
 function scanFrame() {
   if (locked) return;
-  const video = document.getElementById('camVideo');
-  const wrap = document.getElementById('camWrap');
-  if (!camStream || video.readyState < 2) return;
+  scanFrameCount++;
+  try {
+    const video = document.getElementById('camVideo');
+    const wrap = document.getElementById('camWrap');
+    if (!camStream) { log(`Кадр #${scanFrameCount}: пропущено (camStream відсутній).`); return; }
+    if (video.readyState < 2) { log(`Кадр #${scanFrameCount}: пропущено (video.readyState=${video.readyState}, відео ще не готове).`); return; }
 
-  const size = wrap.clientWidth || 320;
-  const canvas = document.createElement('canvas');
-  canvas.width = size; canvas.height = size;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  const vw = video.videoWidth, vh = video.videoHeight;
-  if (vw && vh) {
-    const sSize = Math.min(vw, vh);
-    const sx = (vw - sSize) / 2, sy = (vh - sSize) / 2;
-    ctx.drawImage(video, sx, sy, sSize, sSize, 0, 0, size, size);
-  } else {
-    ctx.drawImage(video, 0, 0, size, size);
-  }
-  const imgData = ctx.getImageData(0, 0, size, size);
+    const size = wrap.clientWidth || 320;
+    const canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (vw && vh) {
+      const sSize = Math.min(vw, vh);
+      const sx = (vw - sSize) / 2, sy = (vh - sSize) / 2;
+      ctx.drawImage(video, sx, sy, sSize, sSize, 0, 0, size, size);
+    } else {
+      ctx.drawImage(video, 0, 0, size, size);
+    }
+    let imgData;
+    try {
+      imgData = ctx.getImageData(0, 0, size, size);
+    } catch (e) {
+      log(`Кадр #${scanFrameCount}: ПОМИЛКА getImageData: ${e.name}: ${e.message}. Відео ${vw}x${vh}, канвас ${size}x${size}.`);
+      document.getElementById('camStatus').textContent = `Помилка читання кадру: ${e.message}`;
+      return;
+    }
 
-  const phrase = document.getElementById('phraseInput').value;
-  const Q = computeRequiredQ(phrase);
-  const { geo, grid, dataCapacity, activeCount } = buildSectorGrid(Q, phrase);
+    const phrase = document.getElementById('phraseInput').value;
+    const Q = computeRequiredQ(phrase);
+    const { geo, grid, dataCapacity, activeCount } = buildSectorGrid(Q, phrase);
 
-  const det = detectAndDecode(imgData, size, size, Q, geo);
+    const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const det = detectAndDecode(imgData, size, size, Q, geo);
+    const t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const ms = Math.round(t1 - t0);
 
-  if (!det.ok) {
-    recentCentroids = []; recentTexts = [];
-    drawLiveOverlay(size, size, det.bullseye ? { cx: det.bullseye.cx, cy: det.bullseye.cy } : null, `Шукаю... (${det.reason})`);
-    document.getElementById('camStatus').textContent = `Пошук: ${det.reason}`;
-    return;
-  }
+    if (!det.ok) {
+      recentCentroids = []; recentTexts = [];
+      log(`Кадр #${scanFrameCount} (${size}×${size}px, відео ${vw}x${vh}, ${ms}мс, Q=${Q}): НЕ ЗНАЙДЕНО — ${det.reason}`);
+      drawLiveOverlay(size, size, det.bullseye ? { cx: det.bullseye.cx, cy: det.bullseye.cy } : null, `Шукаю... (${det.reason})`);
+      document.getElementById('camStatus').textContent = `Пошук: ${det.reason}`;
+      return;
+    }
 
-  if (det.agreement < MIN_AGREEMENT) {
-    recentCentroids = []; recentTexts = [];
-    drawLiveOverlay(size, size, det, `Знайдено, узгодженість слабка (${(det.agreement*100).toFixed(0)}%)`);
-    document.getElementById('camStatus').textContent = `Кандидат — узгодженість ${(det.agreement*100).toFixed(0)}%, шукаю стабільніший кадр...`;
-    return;
-  }
+    if (det.agreement < MIN_AGREEMENT) {
+      recentCentroids = []; recentTexts = [];
+      log(`Кадр #${scanFrameCount} (${ms}мс): око знайдено, але узгодженість слабка (${(det.agreement*100).toFixed(0)}%) — чекаю стабільнішого кадру.`);
+      drawLiveOverlay(size, size, det, `Знайдено, узгодженість слабка (${(det.agreement*100).toFixed(0)}%)`);
+      document.getElementById('camStatus').textContent = `Кандидат — узгодженість ${(det.agreement*100).toFixed(0)}%, шукаю стабільніший кадр...`;
+      return;
+    }
 
-  const votedDataBits = det.votedBits.slice(PREAMBLE.length + CHECKSUM_BITS);
-  const votedText = bitsToPhraseFrom(votedDataBits);
-  const centroid = { x: det.cx, y: det.cy };
-  const stable = checkStability(centroid, votedText);
+    const votedDataBits = det.votedBits.slice(PREAMBLE.length + CHECKSUM_BITS);
+    const votedText = bitsToPhraseFrom(votedDataBits);
+    const centroid = { x: det.cx, y: det.cy };
+    const stable = checkStability(centroid, votedText);
+    log(`Кадр #${scanFrameCount} (${ms}мс): кандидат прийнято, узгодженість=${(det.agreement*100).toFixed(0)}%, текст="${votedText}", стабілізація=${recentCentroids.length}/${CONFIRM_STREAK}${stable ? ' — ФІКСУЮ' : ''}.`);
 
   drawLiveOverlay(size, size, det, stable ? 'Стабільно, декодую...' : `Стабілізація... (${recentCentroids.length}/${CONFIRM_STREAK})`);
   document.getElementById('camStatus').textContent = stable
     ? 'Впевнено знайдено — декодую.'
     : `Кандидат (узгодженість ${(det.agreement*100).toFixed(0)}%) — стабілізація ${recentCentroids.length}/${CONFIRM_STREAK}`;
 
-  if (stable) {
-    locked = true;
-    log(`Зафіксовано: узгодженість=${(det.agreement*100).toFixed(1)}%, текст="${votedText}".`);
-    finishDecode(size, size, Q, geo, phrase, det, votedDataBits, votedText);
+    if (stable) {
+      locked = true;
+      log(`Зафіксовано: узгодженість=${(det.agreement*100).toFixed(1)}%, текст="${votedText}".`);
+      finishDecode(size, size, Q, geo, phrase, det, votedDataBits, votedText);
+    }
+  } catch (e) {
+    log(`Кадр #${scanFrameCount}: НЕОБРОБЛЕНА ПОМИЛКА у scanFrame: ${e.name}: ${e.message}\n${e.stack || '(без стек-трейсу)'}`);
+    document.getElementById('camStatus').textContent = `Помилка сканування: ${e.message} (див. лог)`;
   }
 }
 
