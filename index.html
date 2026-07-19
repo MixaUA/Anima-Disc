@@ -125,9 +125,7 @@ const QUADRANT_CENTER_DEG = [0, 90, 180, 270];
 const ACTIVE_PER_LEVEL = [12, 12, 12, 18, 24]; // active data slots per section, per level (outer = denser)
 const RESERVED_EACH_SIDE = 2; // reserved raw slots on each side of a section boundary, every level
 
-const FINDER_OUTER_RADIUS = 13;
-const FINDER_GAP_RADIUS = 7.5;
-const FINDER_DOT_RADIUS = 3.5;
+const FINDER_OUTER_RADIUS = 13; // суцільна крапка-маяк — не кільце (див. коментар біля drawFinder)
 
 const DISC_BG = '#f5f0e8'; // не чисто білий — за спостереженням, чистий білий фон заважає пошуку маяків при переекспонуванні
 
@@ -228,13 +226,17 @@ function decodeSectionsToText(sections) {
 /* ================================================================
    МАЛЮВАННЯ ЕНКОДЕРА
    ================================================================ */
+/* Суцільна чорна крапка, НЕ кільце. Перша версія малювала маяк як
+   чорне кільце + білий проміжок + чорна крапка всередині — виглядало
+   як "приціл", але заповненість (fill ratio) такого кільця у власній
+   bounding box ~0.51, а фільтр форми в детекторі (перенесений з
+   вишиванки, де маяки — суцільні крапки) вимагає ≥0.55. Перевірено на
+   синтетичному зображенні: кільце не проходило фільтр 0 з 4 разів —
+   гарантовано, не залежно від тексту чи камери. Суцільна крапка дає
+   заповненість ~0.78 і проходить надійно. */
 function drawFinder(ctx, cx, cy) {
   ctx.fillStyle = '#000000';
   ctx.beginPath(); ctx.arc(cx, cy, FINDER_OUTER_RADIUS, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = DISC_BG;
-  ctx.beginPath(); ctx.arc(cx, cy, FINDER_GAP_RADIUS, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#000000';
-  ctx.beginPath(); ctx.arc(cx, cy, FINDER_DOT_RADIUS, 0, Math.PI * 2); ctx.fill();
 }
 
 function drawDataRing(ctx, lvl, full) {
