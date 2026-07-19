@@ -125,6 +125,7 @@ canvas#previewCanvas { width: 100%; aspect-ratio: 1 / 1; border-radius: 12px; bo
 .cam-live.active { display: block; }
 .cam-wrap video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
 .cam-wrap canvas.overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; }
+.cam-wrap canvas.guide { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
 .scan-status { position: absolute; bottom: 6px; left: 0; right: 0; text-align: center; font-size: 11px; font-family: monospace; color: #fff; text-shadow: 0 1px 3px #000; z-index: 3; }
 .results { font-family: monospace; font-size: 13px; line-height: 1.7; }
 .final-result { font-size: 17px; text-align: center; padding: 14px; margin-top: 8px; background: rgba(255,255,255,0.08); border-radius: 8px; }
@@ -168,6 +169,7 @@ textarea { width: 100%; height: 180px; font-family: monospace; font-size: 11px; 
     <div class="cam-placeholder" id="camPlaceholder">OpenCV завантажується...</div>
     <div class="cam-live" id="camLive">
       <video id="camVideo" autoplay playsinline muted></video>
+      <canvas id="guideCanvas" class="guide"></canvas>
       <canvas id="overlayCanvas" class="overlay"></canvas>
       <div class="scan-status" id="scanStatusOverlay"></div>
     </div>
@@ -836,7 +838,13 @@ function trackingMiss() {
 function resetTracking() { smoothedAxis = null; trackMissCount = 0; }
 
 const CONFIRM_STREAK = 3;
-const MIN_AGREEMENT = 0.85;
+// Піднято з 0.85: у тесті кадр з узгодженістю 85.9% дав 3 стабільні
+// кадри поспіль з ОДНАКОВО неправильним текстом ("КОХА?" замість
+// "КОХАЮ") — тобто систематична, а не випадкова помилка гомографії в
+// конкретному положенні камери, яка пройшла перевірку стабільності
+// (та перевіряє лише "чи однаковий текст 3 кадри поспіль", не "чи він
+// правильний"). Вищий поріг менш охоче фіксує межові кадри.
+const MIN_AGREEMENT = 0.93;
 const STABILITY_TOL_PX = 14;
 let recentCentroids = [];
 let recentTexts = [];
@@ -863,6 +871,66 @@ let camStream = null;
 let scanTimer = null;
 let locked = false;
 
+/* Статичний приціл: пунктирне коло "тримайте диск у межах цього кола" +
+   внутрішнє коло приблизно там, де мають бути маяки, + хрестик по центру.
+   Малюється ОДИН РАЗ при старті камери (і при зміні розміру вікна) на
+   окремому шарі під overlayCanvas — на відміну від зеленого/жовтого
+   оверлею детекції, який очищується й перемальовується щокадру і тому
+   тремтить/зникає, приціл лишається нерухомим орієнтиром завжди. */
+function drawGuide(W, H) {
+  const gc = document.getElementById('guideCanvas');
+  gc.width = W; gc.height = H;
+  const g = gc.getContext('2d');
+  g.clearRect(0, 0, W, H);
+  const cx = W / 2, cy = H / 2;
+  const outerR = Math.min(W, H) * 0.42;
+  // 225 ≈ фактичний зовнішній радіус диска в локальних одиницях малювання
+  // (LEVEL_RADII[4] + запас), FINDER_R — радіус кільця маяків: їхнє
+  // співвідношення дає, на якій частці зовнішнього кола приблизно
+  // опиняться маяки, коли диск заповнює приціл.
+  const beaconR = outerR * (FINDER_R / 225);
+
+  g.save();
+  g.setLineDash([6, 6]);
+  g.lineWidth = 2;
+  g.strokeStyle = 'rgba(255,255,255,0.55)';
+  g.beginPath(); g.arc(cx, cy, outerR, 0, Math.PI * 2); g.stroke();
+
+  g.strokeStyle = 'rgba(255,210,90,0.55)';
+  g.beginPath(); g.arc(cx, cy, beaconR, 0, Math.PI * 2); g.stroke();
+  g.restore();
+
+  g.strokeStyle = 'rgba(255,255,255,0.65)';
+  g.lineWidth = 1.5;
+  g.beginPath();
+  g.moveTo(cx - 11, cy); g.lineTo(cx + 11, cy);
+  g.moveTo(cx, cy - 11); g.lineTo(cx, cy + 11);
+  g.stroke();
+
+  g.fillStyle = 'rgba(255,210,90,0.8)';
+  [0, 90, 180, 270].forEach(deg => {
+    const rad = deg * Math.PI / 180;
+    const tx = cx + Math.cos(rad) * beaconR, ty = cy + Math.sin(rad) * beaconR;
+    g.beginPath(); g.arc(tx, ty, 3, 0, Math.PI * 2); g.fill();
+  });
+
+  g.font = '11px monospace';
+  g.textAlign = 'center';
+  g.fillStyle = 'rgba(255,255,255,0.6)';
+  const labelY = (cy + outerR + 16 < H - 4) ? cy + outerR + 16 : cy - outerR - 8;
+  g.fillText('тримайте диск у межах кола', cx, labelY);
+}
+function clearGuide() {
+  const gc = document.getElementById('guideCanvas');
+  gc.getContext('2d').clearRect(0, 0, gc.width, gc.height);
+}
+window.addEventListener('resize', () => {
+  if (camStream) {
+    const wrap = document.getElementById('camWrap');
+    drawGuide(wrap.clientWidth || 320, wrap.clientHeight || 320);
+  }
+});
+
 async function toggleCamera() {
   if (!openCvReady) return;
   const btn = document.getElementById('camToggleBtn');
@@ -880,6 +948,8 @@ async function toggleCamera() {
     log(`Відео грає. ${video.videoWidth}x${video.videoHeight}`);
     document.getElementById('camPlaceholder').style.display = 'none';
     document.getElementById('camLive').classList.add('active');
+    const wrapEl = document.getElementById('camWrap');
+    drawGuide(wrapEl.clientWidth || video.videoWidth || 320, wrapEl.clientHeight || video.videoHeight || 320);
     status.textContent = 'Камера увімкнена — шукаю якорі...';
     btn.textContent = 'Вимкнути камеру';
     document.getElementById('rescanBtn').style.display = 'none';
@@ -905,6 +975,7 @@ function stopCamera() {
   resetTracking();
   const oc = document.getElementById('overlayCanvas');
   oc.getContext('2d').clearRect(0, 0, oc.width, oc.height);
+  clearGuide();
   document.getElementById('scanStatusOverlay').textContent = '';
 }
 
