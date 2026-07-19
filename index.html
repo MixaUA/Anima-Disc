@@ -432,14 +432,14 @@ window.closeFullscreenSchema = closeFullscreenSchema;
 // БЛОБ-ДЕТЕКЦІЯ (для пошуку кандидатів у центральний диск ока)
 // =====================================================================
 const MIN_BLOB_SIZE = 3;
-const MAX_BLOB_SIZE = 2500;
-const FLOOD_CAP = 4000;
-const DARK_THRESHOLD_RATIO = 0.68;
-const MIN_FILL_RATIO_ROUND = 0.64;
-const MAX_FILL_RATIO = 0.95;
-const MAX_BLOB_ASPECT = 1.6;
+const MAX_BLOB_SIZE = 6000;
+const FLOOD_CAP = 30000;
+const DARK_THRESHOLD_RATIOS = [0.5, 0.65, 0.8]; // кілька порогів — реальне освітлення нерівномірне, один поріг часто "не влучає"
+const MIN_FILL_RATIO_ROUND = 0.5;
+const MAX_FILL_RATIO = 0.98;
+const MAX_BLOB_ASPECT = 1.8;
 
-function computeAdaptiveDarkThreshold(imgData) {
+function computeAdaptiveDarkThresholds(imgData) {
   const data = imgData.data;
   let total = 0, count = 0;
   for (let i = 0; i < data.length; i += 4 * 7) {
@@ -447,15 +447,16 @@ function computeAdaptiveDarkThreshold(imgData) {
     count++;
   }
   const avgLum = count > 0 ? total / count : 128;
-  return avgLum * DARK_THRESHOLD_RATIO;
+  return DARK_THRESHOLD_RATIOS.map(r => avgLum * r);
 }
 function isDark(lum, threshold) { return lum < threshold; }
 
 function isIsolatedOnBackground(data, W, H, minX, maxX, minY, maxY, threshold) {
-  const haloR = 5;
+  const bw = maxX - minX + 1, bh = maxY - minY + 1;
+  const haloR = Math.max(5, Math.max(bw, bh) * 0.4); // масштабується з розміром плями
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
   const rx = (maxX - minX) / 2 + haloR, ry = (maxY - minY) / 2 + haloR;
-  const SAMPLES = 12;
+  const SAMPLES = 16;
   let lightCount = 0, total = 0;
   for (let i = 0; i < SAMPLES; i++) {
     const ang = (i / SAMPLES) * Math.PI * 2;
@@ -467,7 +468,7 @@ function isIsolatedOnBackground(data, W, H, minX, maxX, minY, maxY, threshold) {
     total++;
     if (!isDark(l, threshold)) lightCount++;
   }
-  return total > 0 && (lightCount / total) >= 0.5;
+  return total > 0 && (lightCount / total) >= 0.7;
 }
 
 function findRoundBlobs(imgData, W, H, step, threshold, searchBounds) {
@@ -534,38 +535,66 @@ const RING_EXPECT_DARK = [true, false, true, false, true];
 const MIN_VALID_RAYS = Math.ceil(RAY_COUNT * 0.6);
 const MIN_TILT_K = 0.55; // якщо еліпс сплюснутий сильніше — це вже не "легкий" нахил
 
-function verifyBullseye(imgData, W, H, cx, cy, s0, threshold) {
+function verifyBullseye(imgData, W, H, cx, cy, s0) {
   const data = imgData.data;
   function lumAt(x, y) {
     x = Math.round(x); y = Math.round(y);
-    if (x < 0 || x >= W || y < 0 || y >= H) return 255;
+    if (x < 0 || x >= W || y < 0 || y >= H) return null;
     const i = (y * W + x) * 4;
     return data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
   }
-  const outerRs = [];
-  let darkSum = 0, darkCnt = 0, lightSum = 0, lightCnt = 0;
+  // 1-й прохід: збираємо всі 5×K зразків без жодної класифікації —
+  // поріг рахуємо ПІСЛЯ, з реального контрасту саме цієї плями. Так
+  // перевірка не залежить від освітлення решти кадру.
+  const rays = [];
+  const allSamples = [];
   for (let k = 0; k < RAY_COUNT; k++) {
     const ang = (k / RAY_COUNT) * Math.PI * 2;
     const dx = Math.cos(ang), dy = Math.sin(ang);
-    let ok = true;
     const samples = [];
+    let bad = false;
     for (let m = 0; m < RING_MID_UNITS.length; m++) {
       const rPx = RING_MID_UNITS[m] * RING_UNIT * s0;
       const lum = lumAt(cx + dx * rPx, cy + dy * rPx);
+      if (lum === null) { bad = true; break; }
       samples.push(lum);
-      const dark = lum < threshold;
-      if (dark !== RING_EXPECT_DARK[m]) { ok = false; }
+    }
+    if (bad) continue;
+    rays.push({ ang, dx, dy, samples });
+    allSamples.push(...samples);
+  }
+  if (rays.length < MIN_VALID_RAYS) return null;
+
+  // Очікувано 3 темних + 2 світлих зразки на промінь: локальний поріг —
+  // середина між "верхом темної групи" і "низом світлої групи" в
+  // відсортованому масиві.
+  const sorted = allSamples.slice().sort((a, b) => a - b);
+  const splitIdx = Math.round(sorted.length * 0.6); // 3/5 = 60% мають бути темні
+  const darkTop = sorted[Math.max(0, splitIdx - 1)];
+  const lightBottom = sorted[Math.min(sorted.length - 1, splitIdx)];
+  if (lightBottom - darkTop < 12) return null; // немає чіткого контрасту — це не воно
+  const localThreshold = (darkTop + lightBottom) / 2;
+
+  const outerRs = [];
+  let darkSum = 0, darkCnt = 0, lightSum = 0, lightCnt = 0;
+  for (const ray of rays) {
+    let ok = true;
+    for (let m = 0; m < ray.samples.length; m++) {
+      const dark = ray.samples[m] < localThreshold;
+      if (dark !== RING_EXPECT_DARK[m]) { ok = false; break; }
     }
     if (!ok) continue;
-    samples.forEach((lum, m) => {
+    ray.samples.forEach((lum, m) => {
       if (RING_EXPECT_DARK[m]) { darkSum += lum; darkCnt++; } else { lightSum += lum; lightCnt++; }
     });
     let outerR = 7 * RING_UNIT * s0;
-    for (let t = 6.3; t <= 7.9; t += 0.02) {
+    for (let t = 6.3; t <= 7.9; t += 0.06) {
       const rPx = t * RING_UNIT * s0;
-      if (lumAt(cx + dx * rPx, cy + dy * rPx) >= threshold) { outerR = (t - 0.01) * RING_UNIT * s0; break; }
+      const lum = lumAt(cx + ray.dx * rPx, cy + ray.dy * rPx);
+      if (lum === null) break;
+      if (lum >= localThreshold) { outerR = (t - 0.01) * RING_UNIT * s0; break; }
     }
-    outerRs.push({ ang, r: outerR });
+    outerRs.push({ ang: ray.ang, r: outerR });
   }
   if (outerRs.length < MIN_VALID_RAYS) return null;
 
@@ -581,21 +610,42 @@ function verifyBullseye(imgData, W, H, cx, cy, s0, threshold) {
   return { validRays: outerRs.length, scale, phi: maxAng, k: kTilt, fgLum, bgLum };
 }
 
-const CANDIDATE_POOL_SIZE = 8;
+const CANDIDATE_POOL_SIZE = 100;
 
-function findBullseye(imgData, W, H, threshold, searchBounds) {
-  const blobs = findRoundBlobs(imgData, W, H, 3, threshold, searchBounds);
-  if (blobs.length === 0) return { found: null, blobCount: 0 };
-  blobs.sort((a, b) => b.size - a.size);
-  const candidates = blobs.slice(0, CANDIDATE_POOL_SIZE);
-  let best = null;
-  for (const c of candidates) {
-    const estRadiusPx = Math.sqrt(c.size / Math.PI);
-    const s0 = estRadiusPx / RING_UNIT; // припускаємо, що ця пляма — центральний диск (1 RING_UNIT)
-    const v = verifyBullseye(imgData, W, H, c.x, c.y, s0, threshold);
-    if (v && (!best || v.validRays > best.v.validRays)) best = { cx: c.x, cy: c.y, v };
+function findBullseye(imgData, W, H, thresholds, searchBounds) {
+  function tryThresholds(thrList) {
+    const seen = [];
+    const blobs = [];
+    for (const threshold of thrList) {
+      for (const b of findRoundBlobs(imgData, W, H, 3, threshold, searchBounds)) {
+        const dup = seen.find(s => Math.hypot(s.x - b.x, s.y - b.y) < 8);
+        if (dup) continue;
+        seen.push(b);
+        blobs.push(b);
+      }
+    }
+    if (blobs.length === 0) return null;
+    blobs.sort((a, b) => b.size - a.size);
+    const candidates = blobs.slice(0, CANDIDATE_POOL_SIZE);
+    let best = null;
+    for (const c of candidates) {
+      const estRadiusPx = Math.sqrt(c.size / Math.PI);
+      const s0 = estRadiusPx / RING_UNIT; // припускаємо, що ця пляма — центральний диск (1 RING_UNIT)
+      const v = verifyBullseye(imgData, W, H, c.x, c.y, s0);
+      if (v && (!best || v.validRays > best.v.validRays)) best = { cx: c.x, cy: c.y, v };
+      if (best && best.v.validRays === RAY_COUNT && best.v.k >= 0.95) break; // ідеальний кандидат — далі не шукаємо
+    }
+    return { best, blobCount: blobs.length };
   }
-  return { found: best, blobCount: blobs.length, candidateCount: candidates.length };
+
+  // Спершу пробуємо лише середній (найбільш "типовий") поріг — це
+  // найшвидший шлях у звичайному освітленні. Лише якщо він нічого не
+  // дав, підключаємо решту порогів (повільніше, але надійніше для
+  // складного освітлення).
+  let r = tryThresholds([thresholds[1]]);
+  if (!r || !r.best) r = tryThresholds(thresholds);
+  if (!r) return { found: null, blobCount: 0 };
+  return { found: r.best, blobCount: r.blobCount };
 }
 
 // =====================================================================
@@ -604,7 +654,7 @@ function findBullseye(imgData, W, H, threshold, searchBounds) {
 // Tilt/scale/center — з верифікації ока (незалежні від θ), θ і flip
 // перебираються при пошуку орієнтації.
 // =====================================================================
-function sampleBitsAtTheta(imgData, W, H, cx, cy, scale, phi, k, theta, flip, geo, Q, indices, threshold) {
+function sampleBitsAtTheta(imgData, W, H, cx, cy, scale, phi, k, theta, flip, geo, Q, indices, margin) {
   const data = imgData.data;
   function lumAt(x, y) {
     x = Math.round(x); y = Math.round(y);
@@ -622,9 +672,16 @@ function sampleBitsAtTheta(imgData, W, H, cx, cy, scale, phi, k, theta, flip, ge
     const gIdx = geo.order[indices[ii]];
     const rx = gIdx % Q, ry = Math.floor(gIdx / Q);
     let lx = (rx + 0.5) * CELL, ly = (ry + 0.5) * CELL;
-    if (flip) lx = -lx;
+    // локальна точка порівняння: середина верхнього краю клітинки — там
+    // гарантовано немає стібка (обидві діагоналі X проходять на відстані
+    // ~0.5×CELL, набагато більше половини товщини лінії), тому це ЗАВЖДИ
+    // фон і несе ту саму локальну освітленість, що й сам зразок
+    let refLx = rx * CELL + CELL * 0.5, refLy = ry * CELL + CELL * 0.08;
+    if (flip) { lx = -lx; refLx = -refLx; }
     const px = cx + m11*lx + m12*ly, py = cy + m21*lx + m22*ly;
-    bits[ii] = lumAt(px, py) < threshold ? 1 : 0;
+    const rpx = cx + m11*refLx + m12*refLy, rpy = cy + m21*refLx + m22*refLy;
+    const centerLum = lumAt(px, py), refLum = lumAt(rpx, rpy);
+    bits[ii] = (refLum - centerLum) > margin ? 1 : 0;
   }
   return bits;
 }
@@ -648,15 +705,15 @@ const MAX_ACCEPT_HAMMING = 1; // сумарний допуск (преамбул
 function hamming(a, b) { let d = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++; return d; }
 
 function detectAndDecode(imgData, W, H, Q, geo) {
-  const threshold = computeAdaptiveDarkThreshold(imgData);
-  const { found, blobCount } = findBullseye(imgData, W, H, threshold, trackedBounds);
+  const thresholds = computeAdaptiveDarkThresholds(imgData);
+  const { found, blobCount } = findBullseye(imgData, W, H, thresholds, trackedBounds);
 
   if (!found) {
     trackingMiss();
     return { ok: false, reason: `бичаче око не знайдено серед ${blobCount} круглих плям${trackedBounds ? ' [звужена зона]' : ''}` };
   }
   const { cx, cy, v } = found;
-  const calThreshold = (v.fgLum + v.bgLum) / 2;
+  const calMargin = Math.max(10, (v.bgLum - v.fgLum) * 0.35);
   const preambleIdx = Array.from({ length: PREAMBLE.length }, (_, i) => i);
   const allIdx = Array.from({ length: geo.capacity }, (_, i) => i);
 
@@ -664,7 +721,7 @@ function detectAndDecode(imgData, W, H, Q, geo) {
   for (const flip of [false, true]) {
     for (let tdeg = 0; tdeg < 360; tdeg += THETA_COARSE_STEP) {
       const theta = tdeg * Math.PI / 180;
-      const bits = sampleBitsAtTheta(imgData, W, H, cx, cy, v.scale, v.phi, v.k, theta, flip, geo, Q, preambleIdx, calThreshold);
+      const bits = sampleBitsAtTheta(imgData, W, H, cx, cy, v.scale, v.phi, v.k, theta, flip, geo, Q, preambleIdx, calMargin);
       if (hamming(bits, PREAMBLE) <= MAX_PREAMBLE_HAMMING_COARSE) coarseHits.push({ tdeg, flip });
     }
   }
@@ -682,7 +739,7 @@ function detectAndDecode(imgData, W, H, Q, geo) {
     for (let td = hit.tdeg - THETA_REFINE_RANGE; td <= hit.tdeg + THETA_REFINE_RANGE; td += THETA_REFINE_STEP) {
       const theta = td * Math.PI / 180;
       for (const sf of SCALE_REFINE_FACTORS) {
-        const bits = sampleBitsAtTheta(imgData, W, H, cx, cy, v.scale * sf, v.phi, v.k, theta, hit.flip, geo, Q, allIdx, calThreshold);
+        const bits = sampleBitsAtTheta(imgData, W, H, cx, cy, v.scale * sf, v.phi, v.k, theta, hit.flip, geo, Q, allIdx, calMargin);
         const preDist = hamming(bits.slice(0, PREAMBLE.length), PREAMBLE);
         if (preDist > MAX_ACCEPT_HAMMING) continue;
         const checksum = bits.slice(PREAMBLE.length, PREAMBLE.length + CHECKSUM_BITS);
@@ -717,7 +774,7 @@ function detectAndDecode(imgData, W, H, Q, geo) {
       const scaleTry = accepted.scale * sm;
       let total = 0;
       for (let kk = 0; kk < 4; kk++) {
-        const bits = sampleBitsAtTheta(imgData, W, H, cx, cy, scaleTry, v.phi, v.k, thetaTry + kk * Math.PI / 2, accepted.flip, geo, Q, allIdx, calThreshold);
+        const bits = sampleBitsAtTheta(imgData, W, H, cx, cy, scaleTry, v.phi, v.k, thetaTry + kk * Math.PI / 2, accepted.flip, geo, Q, allIdx, calMargin);
         const checksum = bits.slice(PREAMBLE.length, PREAMBLE.length + CHECKSUM_BITS);
         const dataBits = bits.slice(PREAMBLE.length + CHECKSUM_BITS);
         total += hamming(bits.slice(0, PREAMBLE.length), PREAMBLE) + hamming(computeChecksum(dataBits), checksum);
@@ -732,7 +789,7 @@ function detectAndDecode(imgData, W, H, Q, geo) {
   const thetaBase = accepted.theta * Math.PI / 180;
   const perCopy = [];
   for (let kk = 0; kk < 4; kk++) {
-    const bits = sampleBitsAtTheta(imgData, W, H, cx, cy, v.scale, v.phi, v.k, thetaBase + kk * Math.PI / 2, accepted.flip, geo, Q, allIdx, calThreshold);
+    const bits = sampleBitsAtTheta(imgData, W, H, cx, cy, v.scale, v.phi, v.k, thetaBase + kk * Math.PI / 2, accepted.flip, geo, Q, allIdx, calMargin);
     perCopy.push(bits);
   }
 
@@ -770,7 +827,7 @@ function detectAndDecode(imgData, W, H, Q, geo) {
   return {
     ok: true, cx, cy, scale: v.scale, phi: v.phi, k: v.k,
     theta: thetaBase, flip: accepted.flip, perCopy, votedBits, agreement,
-    blobCount, calThreshold
+    blobCount, calMargin
   };
 }
 
