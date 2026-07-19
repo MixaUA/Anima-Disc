@@ -709,6 +709,22 @@ function trackedFromCandidates(candidates, predictedPts, scalePx) {
 /* ================================================================
    СЕМПЛІНГ БІТ ПО ДУГАХ + ВИЗНАЧЕННЯ ОРІЄНТАЦІЇ ЗА СТАРТ-СИМВОЛОМ
    ================================================================ */
+/* Раніше: 1 піксель на біт + 1 поріг на весь кадр. Обидва — джерела
+   похибки, яку гомографія сама по собі виправити не може (вона задає
+   ПРАВИЛЬНУ проекцію, але фінальний прочитаний біт все одно залежить
+   від того, як ми семплимо навколо цієї точки):
+   1) Точкове семплювання: щонайменша похибка 4 калібрувальних точок
+      (навіть у частку пікселя) найбільше зміщує зовнішні, щільніші
+      кільця — там сусідній слот може опинитись за 1-2px, і одна точка
+      може випадково влучити не туди. Тепер на кожен слот беремо 5
+      підточок (центр + зсуви по радіусу і куту в межах штриха, який
+      сам енкодер малює) і усереднюємо яскравість — це набагато
+      стійкіше до дрібної похибки вирівнювання й шуму камери.
+   2) Один глобальний поріг: при нахиленому диску або напрямленому
+      світлі яскравість природно "пливе" від центру до краю — поріг,
+      порахований на весь кадр разом, буде трохи не точним і в центрі,
+      і на краю. Порахований ОКРЕМО для кожного рівня (кільця) —
+      значно ближчий до реальної яскравості саме в тому кільці. */
 function sampleAllLevels(imgData, W, H, transform) {
   const data = imgData.data;
   function lumAt(x, y) {
@@ -720,34 +736,49 @@ function sampleAllLevels(imgData, W, H, transform) {
 
   const points = [];
   LEVELS.forEach((lvl, li) => {
+    const dr = TICK_WIDTH * 0.3;            // зсув по радіусу — в межах товщини штриха
+    const da = lvl.angleStepRad * 0.15;     // зсув по куту — в межах активної дуги слота
     for (let sec = 0; sec < SECTIONS; sec++) {
       lvl.activeLocalSlots.forEach((slot, k) => {
         const globalSlot = sec * lvl.rawCount + slot;
         const angle = (globalSlot + 0.5) * lvl.angleStepRad;
-        const lx = Math.cos(angle) * lvl.radius;
-        const ly = Math.sin(angle) * lvl.radius;
-        points.push({ section: sec, levelIdx: li, localIdx: k, lx, ly });
+        const subOffsets = [
+          { rr: 0, aa: 0 }, { rr: dr, aa: 0 }, { rr: -dr, aa: 0 },
+          { rr: 0, aa: da }, { rr: 0, aa: -da }
+        ];
+        const subs = subOffsets.map(o => {
+          const r = lvl.radius + o.rr, a = angle + o.aa;
+          return { lx: Math.cos(a) * r, ly: Math.sin(a) * r };
+        });
+        points.push({ section: sec, levelIdx: li, localIdx: k, subs });
       });
     }
   });
 
-  let minL = 255, maxL = 0;
-  const lums = points.map(pt => {
-    const p = applyHomography(transform, pt.lx, pt.ly);
-    const l = lumAt(p.x, p.y);
-    if (l < minL) minL = l; if (l > maxL) maxL = l;
-    return l;
+  // усереднена яскравість кожного слота (по 5 підточках), плюс поріг ОКРЕМО на рівень
+  const levelLums = LEVELS.map(() => ({ min: 255, max: 0 }));
+  const slotLums = points.map(pt => {
+    let sum = 0;
+    for (const s of pt.subs) {
+      const p = applyHomography(transform, s.lx, s.ly);
+      sum += lumAt(p.x, p.y);
+    }
+    const avg = sum / pt.subs.length;
+    const lv = levelLums[pt.levelIdx];
+    if (avg < lv.min) lv.min = avg;
+    if (avg > lv.max) lv.max = avg;
+    return avg;
   });
-  const threshold = (minL + maxL) / 2;
+  const levelThresholds = levelLums.map(lv => (lv.min + lv.max) / 2);
 
   const physicalSections = [];
   for (let sec = 0; sec < SECTIONS; sec++) physicalSections.push(LEVELS.map(lvl => new Array(lvl.activeCount).fill(0)));
 
   points.forEach((pt, i) => {
-    physicalSections[pt.section][pt.levelIdx][pt.localIdx] = lums[i] < threshold ? 1 : 0;
+    physicalSections[pt.section][pt.levelIdx][pt.localIdx] = slotLums[i] < levelThresholds[pt.levelIdx] ? 1 : 0;
   });
 
-  return { physicalSections, threshold };
+  return { physicalSections, levelThresholds };
 }
 
 function reassembleWithRotation(physicalSections) {
@@ -778,7 +809,7 @@ function checksumAgreement(sections) {
 /* ================================================================
    ГОЛОВНИЙ ЦИКЛ ДЕТЕКЦІЇ: тримання → холодний старт як fallback
    ================================================================ */
-function detectAndDecode(imgData, W, H) {
+function detectAndDecode(imgData, W, H, hiImgData, hiW, hiH) {
   if (!openCvReady) return { ok: false, reason: 'OpenCV ще завантажується...', mode: 'loading' };
 
   const candidates = detectBullseyeCandidates(imgData, W, H);
@@ -799,8 +830,22 @@ function detectAndDecode(imgData, W, H) {
     pts = cs.points; scalePx = cs.scalePx; mode = 'cold';
   }
 
-  const transform = solveHomography(LOCAL_ANCHORS, pts);
-  const { physicalSections } = sampleAllLevels(imgData, W, H, transform);
+  // Пошук маяків завжди йде на дешевому маленькому кадрі (швидкість).
+  // Але сáме читання бітів — де найбільше страждає точність — можна
+  // робити на значно більшому кадрі з тієї ж миті відео: більше фізичних
+  // пікселів на слот означає менше шуму семплювання незалежно від того,
+  // наскільки точна сама гомографія. Точки маяків масштабуються лінійно
+  // в координати hi-res кадру (той самий момент відео, просто інший
+  // розмір буфера) — homography рахується вже у hi-res просторі.
+  const useHiRes = hiImgData && hiW && hiH;
+  const sampleImg = useHiRes ? hiImgData : imgData;
+  const sampleW = useHiRes ? hiW : W;
+  const sampleH = useHiRes ? hiH : H;
+  const scale = useHiRes ? (hiW / W) : 1;
+  const samplePts = useHiRes ? pts.map(p => ({ x: p.x * scale, y: p.y * scale })) : pts;
+
+  const transform = solveHomography(LOCAL_ANCHORS, samplePts);
+  const { physicalSections } = sampleAllLevels(sampleImg, sampleW, sampleH, transform);
   const { sections, startOk } = reassembleWithRotation(physicalSections);
   const agreement = checksumAgreement(sections);
 
@@ -1030,21 +1075,34 @@ function scanFrame() {
   const wrap = document.getElementById('camWrap');
   if (!camStream || video.readyState < 2) return;
 
-  const size = wrap.clientWidth || 320;
-  const canvas = document.createElement('canvas');
-  canvas.width = size; canvas.height = size;
-  const cctx = canvas.getContext('2d', { willReadFrequently: true });
+  const loSize = wrap.clientWidth || 320;
   const vw = video.videoWidth, vh = video.videoHeight;
+  // hi-res буфер — той самий кадр відео, але з більшою фізичною
+  // роздільністю, ніж дисплей: більше пікселів на біт при семплюванні
+  // (пошук маяків лишається на дешевому loSize-буфері — там роздільність
+  // не критична, важлива лише швидкість).
+  const hiSize = vw && vh ? Math.min(Math.min(vw, vh), 640) : loSize;
+
+  const hiCanvas = document.createElement('canvas');
+  hiCanvas.width = hiSize; hiCanvas.height = hiSize;
+  const hctx = hiCanvas.getContext('2d', { willReadFrequently: true });
   if (vw && vh) {
     const sSize = Math.min(vw, vh);
     const sx = (vw - sSize) / 2, sy = (vh - sSize) / 2;
-    cctx.drawImage(video, sx, sy, sSize, sSize, 0, 0, size, size);
+    hctx.drawImage(video, sx, sy, sSize, sSize, 0, 0, hiSize, hiSize);
   } else {
-    cctx.drawImage(video, 0, 0, size, size);
+    hctx.drawImage(video, 0, 0, hiSize, hiSize);
   }
-  const imgData = cctx.getImageData(0, 0, size, size);
+  const hiImgData = hctx.getImageData(0, 0, hiSize, hiSize);
 
-  const det = detectAndDecode(imgData, size, size);
+  const loCanvas = document.createElement('canvas');
+  loCanvas.width = loSize; loCanvas.height = loSize;
+  const cctx = loCanvas.getContext('2d', { willReadFrequently: true });
+  cctx.drawImage(hiCanvas, 0, 0, hiSize, hiSize, 0, 0, loSize, loSize);
+  const imgData = cctx.getImageData(0, 0, loSize, loSize);
+
+  const size = loSize;
+  const det = detectAndDecode(imgData, size, size, hiImgData, hiSize, hiSize);
   frameCounter++;
 
   if (!det.ok) {
