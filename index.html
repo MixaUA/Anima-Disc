@@ -4,7 +4,84 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Round Code — Енкодер + Декодер</title>
-<script async src="opencv.js" onload="onOpenCvScriptLoaded();" type="text/javascript"></script>
+<script>
+/* ================================================================
+   БУТСТРАП ЗАВАНТАЖЕННЯ OPENCV — окремо, ДО тега <script src="opencv.js">
+   ================================================================
+   Причина, чому це окремий блок ПЕРЕД підключенням opencv.js, а не
+   всередині головного скрипта внизу сторінки: тег нижче має
+   async + onload="onOpenCvScriptLoaded()". Якщо opencv.js (1.9МБ)
+   завантажиться швидко (локальний файл, кеш, швидка мережа), подія
+   onload може спрацювати РАНІШЕ, ніж браузер дійде до розбору
+   головного <script> внизу body, де раніше й була визначена функція
+   onOpenCvScriptLoaded. У такому разі onload намагається викликати
+   ще не оголошену функцію — ReferenceError, який осідає в консолі
+   браузера мовчки, у наш власний UI-лог НІКОЛИ не потрапляючи. Це і
+   виглядає як "OpenCV взагалі не завантажується" ззовні, хоча файл
+   насправді підвантажився нормально. Визначаючи обробники тут, ДО
+   тега підключення, ми гарантуємо, що вони існують до будь-якої події.
+
+   Друга річ, яку це виправляє: ця збірка opencv.js — MODULARIZE-варіант
+   (Emscripten), у якому глобальний `cv` після виконання скрипта — це
+   НЕ готовий об'єкт з методом onRuntimeInitialized, а Promise, що
+   резолвиться в готовий cv лише після компіляції WASM. Старий патерн
+   `cv['onRuntimeInitialized'] = ...` для такої збірки взагалі нічого
+   не робить (просто ставить властивість на Promise). Тому нижче —
+   гілка на обидва варіанти збірки.
+*/
+window.__preLog = [];
+window.__openCvLoadState = 'pending';
+function earlyLog(msg) {
+  window.__preLog.push(msg);
+  try { console.log('[opencv-boot] ' + msg); } catch (e) {}
+}
+(function () {
+  try {
+    const resolvedUrl = new URL('opencv.js', document.baseURI).href;
+    earlyLog('Спроба завантажити opencv.js за адресою: ' + resolvedUrl);
+  } catch (e) {
+    earlyLog('Не вдалося обчислити абсолютний шлях до opencv.js: ' + e.message);
+  }
+})();
+function onOpenCvScriptError(ev) {
+  window.__openCvLoadState = 'script-error';
+  earlyLog('ПОМИЛКА: тег <script src="opencv.js"> не завантажився (onerror). ' +
+    'Перевірте, що файл opencv.js лежить В ТІЙ САМІЙ ПАПЦІ, що й цей html, ' +
+    'і що назва файлу точно "opencv.js" (регістр літер має значення на деяких серверах).');
+  if (window.__cvErrorCallback) window.__cvErrorCallback();
+}
+function onOpenCvScriptLoaded() {
+  window.__openCvLoadState = 'script-loaded';
+  earlyLog('Тег <script src="opencv.js"> відпрацював (onload). Перевіряю глобальний cv...');
+  if (typeof cv === 'undefined') {
+    window.__openCvLoadState = 'cv-undefined';
+    earlyLog('ПОМИЛКА: після завантаження скрипта глобальна змінна cv не визначена. Файл підвантажився, але, схоже, це не валідна збірка opencv.js.');
+    if (window.__cvErrorCallback) window.__cvErrorCallback();
+    return;
+  }
+  if (cv && typeof cv.then === 'function') {
+    earlyLog('cv є Promise (MODULARIZE-збірка) — чекаю резолву WASM runtime...');
+    cv.then(function (resolvedCv) {
+      window.cv = resolvedCv; // підміняємо глобальний cv на готовий об'єкт — увесь інший код звертається до cv.* без змін
+      window.__openCvLoadState = 'ready';
+      earlyLog('cv Promise резолвнувся — WASM runtime готовий.');
+      if (window.__cvReadyCallback) window.__cvReadyCallback();
+    }).catch(function (err) {
+      window.__openCvLoadState = 'promise-rejected';
+      earlyLog('ПОМИЛКА: cv Promise відхилено: ' + (err && err.message ? err.message : String(err)));
+      if (window.__cvErrorCallback) window.__cvErrorCallback();
+    });
+  } else {
+    earlyLog('cv — не Promise (класична збірка) — підключаю onRuntimeInitialized...');
+    cv['onRuntimeInitialized'] = function () {
+      window.__openCvLoadState = 'ready';
+      earlyLog('onRuntimeInitialized спрацював — WASM runtime готовий.');
+      if (window.__cvReadyCallback) window.__cvReadyCallback();
+    };
+  }
+}
+</script>
+<script async src="opencv.js" onload="onOpenCvScriptLoaded();" onerror="onOpenCvScriptError(event);" type="text/javascript"></script>
 <style>
 * { box-sizing: border-box; }
 body {
@@ -435,17 +512,57 @@ function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
    очікуваного розміру маяка не потрібно, OpenCV повертає точний
    радіус кожного знайденого контуру одразу. */
 let openCvReady = false;
-function onOpenCvScriptLoaded() {
-  if (typeof cv === 'undefined') { log('ПОМИЛКА: opencv.js не визначив глобальний cv.'); return; }
-  cv['onRuntimeInitialized'] = () => {
-    openCvReady = true;
-    log('OpenCV готовий (WASM runtime ініціалізовано).');
-    const btn = document.getElementById('camToggleBtn');
-    btn.disabled = false;
-    btn.textContent = 'Увімкнути камеру';
-    document.getElementById('camPlaceholder').textContent = 'Камеру ще не увімкнено';
-  };
+
+/* Обробники завантаження OpenCV визначені раніше, у <head>, ДО тега
+   <script src="opencv.js"> (див. коментар там) — саме щоб не залежати
+   від того, коли браузер розпарсить цей, головний, скрипт. Тут ми лише
+   підписуємось на результат через window.__cvReadyCallback/__cvErrorCallback
+   і одразу перевіряємо window.__openCvLoadState — можливо, все вже
+   встигло завантажитись (або впасти з помилкою) до цього моменту. */
+function flushPreLoadLog() {
+  if (window.__preLog && window.__preLog.length) {
+    window.__preLog.forEach(m => log(m));
+    window.__preLog = [];
+  }
 }
+function onCvReady() {
+  openCvReady = true;
+  flushPreLoadLog();
+  log('OpenCV готовий (WASM runtime ініціалізовано).');
+  const btn = document.getElementById('camToggleBtn');
+  btn.disabled = false;
+  btn.textContent = 'Увімкнути камеру';
+  document.getElementById('camPlaceholder').textContent = 'Камеру ще не увімкнено';
+}
+function onCvLoadError() {
+  flushPreLoadLog();
+  log('OpenCV НЕ завантажився. Камера лишається заблокованою. Дивіться повідомлення вище — там точна причина (шлях, назва файлу, невалідна збірка, помилка WASM).');
+  document.getElementById('camStatus').textContent = 'OpenCV не завантажився — див. лог.';
+  document.getElementById('camPlaceholder').textContent = 'OpenCV не завантажився — див. лог';
+}
+window.__cvReadyCallback = onCvReady;
+window.__cvErrorCallback = onCvLoadError;
+// На випадок, якщо cv вже встиг стати готовим (або впасти з помилкою) ДО
+// того, як браузер дійшов до виконання цього блоку — стан уже записаний
+// у window.__openCvLoadState бутстрапом у <head>, перевіряємо його напряму.
+if (window.__openCvLoadState === 'ready') {
+  onCvReady();
+} else if (window.__openCvLoadState === 'script-error' || window.__openCvLoadState === 'cv-undefined' || window.__openCvLoadState === 'promise-rejected') {
+  onCvLoadError();
+} else {
+  flushPreLoadLog();
+}
+// Watchdog: якщо через 12с після старту сторінки OpenCV все ще не готовий
+// і жодної помилки не зафіксовано — щось зависло мовчки (наприклад,
+// WASM компілюється довго на слабкому пристрої, або мережа "висить" без
+// явної помилки). Друкуємо явний сигнал замість вічної тиші в UI.
+setTimeout(() => {
+  if (!openCvReady) {
+    log(`Попередження: OpenCV досі не готовий через 12с (стан: ${window.__openCvLoadState}). ` +
+      `Якщо стан "pending" або "script-loaded" — WASM ще компілюється (чекайте, особливо на слабких пристроях/мобільних). ` +
+      `Якщо стан "script-error" — перевірте назву й розташування файлу opencv.js. Перевірте також консоль розробника (F12) на CORS-помилки, якщо сторінка відкрита не з file://, а з сервера.`);
+  }
+}, 12000);
 
 function oddify(n) { return (n % 2 === 0) ? n + 1 : n; }
 const ADAPTIVE_C = 6;
