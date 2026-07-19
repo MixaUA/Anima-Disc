@@ -245,13 +245,28 @@ function drawDataRing(ctx, lvl, full) {
 
   for (let i = 0; i < lvl.globalSlots; i++) {
     if (full[i] === 1 && !visited[i]) {
-      let start = i, end = i;
+      let start = i, end = i, count = 1;
+      visited[i] = true;
       while (full[(end + 1) % lvl.globalSlots] === 1 && !visited[(end + 1) % lvl.globalSlots]) {
         end = (end + 1) % lvl.globalSlots;
         visited[end] = true;
-        if (end === start) break;
+        count++;
+        if (count >= lvl.globalSlots) break; // усе кільце активне — далі нема куди йти
       }
-      visited[start] = true;
+
+      if (count >= lvl.globalSlots) {
+        // ВИПРАВЛЕНО: якщо активне ВСЕ кільце, `end` після цикла обходу знову
+        // дорівнює `start` (обійшли по колу), і формула (end+1)*angleStep дає
+        // ширину лише ОДНОГО сектора замість повного кола — раніше це malювало
+        // крихітний штрих замість суцільного кільця й губило дані під ним.
+        // Тут малюємо повне коло explicitly, без розривів-відступів.
+        ctx.beginPath();
+        ctx.arc(CENTER.x, CENTER.y, lvl.radius, 0, Math.PI * 2, false);
+        ctx.lineWidth = TICK_WIDTH;
+        ctx.strokeStyle = '#000000';
+        ctx.stroke();
+        continue;
+      }
 
       let startAngle = start * lvl.angleStepRad + paddingAngle;
       let endAngle = (end + 1) * lvl.angleStepRad - paddingAngle;
