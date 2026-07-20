@@ -5,9 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Round Code — Енкодер + Декодер</title>
 <script>
-/* ================================================================
-   БУТСТРАП ЗАВАНТАЖЕННЯ OPENCV
-*/
 window.__preLog = [];
 window.__openCvLoadState = 'pending';
 function earlyLog(msg) {
@@ -24,9 +21,7 @@ function earlyLog(msg) {
 })();
 function onOpenCvScriptError(ev) {
   window.__openCvLoadState = 'script-error';
-  earlyLog('ПОМИЛКА: тег <script src="opencv.js"> не завантажився (onerror). ' +
-    'Перевірте, що файл opencv.js лежить В ТІЙ САМІЙ ПАПЦІ, що й цей html, ' +
-    'і що назва файлу точно "opencv.js" (регістр літер має значення на деяких серверах).');
+  earlyLog('ПОМИЛКА: тег <script src="opencv.js"> не завантажився (onerror).');
   if (window.__cvErrorCallback) window.__cvErrorCallback();
 }
 function onOpenCvScriptLoaded() {
@@ -34,14 +29,14 @@ function onOpenCvScriptLoaded() {
   earlyLog('Тег <script src="opencv.js"> відпрацював (onload). Перевіряю глобальний cv...');
   if (typeof cv === 'undefined') {
     window.__openCvLoadState = 'cv-undefined';
-    earlyLog('ПОМИЛКА: після завантаження скрипта глобальна змінна cv не визначена. Файл підвантажився, але, схоже, це не валідна збірка opencv.js.');
+    earlyLog('ПОМИЛКА: глобальна змінна cv не визначена.');
     if (window.__cvErrorCallback) window.__cvErrorCallback();
     return;
   }
   if (cv && typeof cv.then === 'function') {
     earlyLog('cv є Promise (MODULARIZE-збірка) — чекаю резолву WASM runtime...');
     cv.then(function (resolvedCv) {
-      window.cv = resolvedCv; // підміняємо глобальний cv на готовий об'єкт — увесь інший код звертається до cv.* без змін
+      window.cv = resolvedCv;
       window.__openCvLoadState = 'ready';
       earlyLog('cv Promise резолвнувся — WASM runtime готовий.');
       if (window.__cvReadyCallback) window.__cvReadyCallback();
@@ -95,6 +90,7 @@ button {
 button:active { transform: scale(0.98); }
 button:disabled { opacity: 0.4; cursor: default; transform: none; }
 button.secondary { background: rgba(255,255,255,0.12); color: #fff; box-shadow: none; border: 1px solid rgba(255,255,255,0.25); }
+button.lang-toggle { background: rgba(255,255,255,0.18); color: #fff; font-size: 12px; padding: 8px 12px; }
 canvas#previewCanvas { width: 100%; aspect-ratio: 1 / 1; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
 .error { font-size: 13px; color: #ff8a8a; min-height: 18px; font-weight: 500; }
 .capacity-note { font-size: 12px; color: rgba(255,255,255,0.5); }
@@ -127,9 +123,12 @@ textarea { width: 100%; height: 180px; font-family: monospace; font-size: 11px; 
     <label for="msgInput">Повідомлення (до <span id="maxLenLabel"></span> символів)</label>
     <div class="counter" id="counter">0 / 0</div>
   </div>
-  <input type="text" id="msgInput" placeholder="Я ТЕБЕ КОХАЮ" />
+  <div style="display:flex; gap:8px; align-items:center;">
+    <input type="text" id="msgInput" placeholder="Я ТЕБЕ КОХАЮ" style="flex:1;" />
+    <button class="lang-toggle" id="langToggleBtn" type="button">УКР</button>
+  </div>
   <div class="capacity-note">
-    <div style="margin-bottom:4px;">Доступні символи:</div>
+    <div style="margin-bottom:4px;">Доступні символи (<span id="langLabel">кирилиця</span>):</div>
     <div id="alphabetBlocks" style="color: #fff; font-family: monospace; display: flex; flex-direction: column; gap: 4px;">
       <div id="blockLetters"></div>
       <div id="blockDigits"></div>
@@ -233,11 +232,88 @@ function levelGeometry(levelIndex) {
 }
 const LEVELS = ACTIVE_PER_LEVEL.map((_, i) => levelGeometry(i));
 
-const MESSAGE_CHARS = "АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ0123456789 .,@'+-".split('');
+/* ================================================================
+   КОДБУК: 33 кирилиці / 26 латиниці (спільні коди-позиції, різні гліфи)
+   + 10 цифр + 19 спецсимволів (7 попередніх + 12 нових) + СТАРТ/PAD.
+   33 + 10 + 19 + 2 = 64 = 2^6 — рівно стеля 6-бітного символу, вільних
+   слотів не лишилось. Тому нижче є ЯВНА перевірка на цю межу: якщо
+   колись сюди додадуть ще один символ і вона мовчки пропаде — раніше
+   idx.toString(2) міг дати 7+ біт замість 6, і padStart це не обрізає,
+   через що ВЕСЬ потік бітів у секції зсувався на позицію — саме це,
+   найімовірніше, і зламало канвас минулого разу навіть без вводу
+   (майже всі 27 символьних слотів порожнього повідомлення — це один і
+   той самий символ PAD, тому зсув на 1 біт у ньому одразу спотворює
+   геометрію по всьому диску).
+   ================================================================ */
+const CYRILLIC_LETTERS = "АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ".split('');
+// 26 букв латиниці + null на решту 7 слотів (той самий слот "букви",
+// що й кирилиця, просто в латинському режимі там нема гліфа — не займає
+// зайвої місткості кодування, лишається просто невживаним у цьому режимі).
+const LATIN_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split('').concat([null, null, null, null, null, null, null]);
+if (CYRILLIC_LETTERS.length !== LATIN_LETTERS.length) {
+  throw new Error('CYRILLIC_LETTERS і LATIN_LETTERS мають бути однакової довжини (спільні коди-позиції).');
+}
+const LETTER_SLOT_COUNT = CYRILLIC_LETTERS.length; // 33
+
+const DIGIT_CHARS = "0123456789".split('');
+// Спецсимволи: 7 початкових + 12 нових (рівно заповнюють кодбук до 64)
+const SPECIAL_CHARS = " .,@'+-".split('').concat(':;()%/*=#"_~'.split(''));
+
 const START_CHAR = '\u0001';
 const PAD_CHAR = '\u0002';
-const CODEBOOK = MESSAGE_CHARS.concat([START_CHAR, PAD_CHAR]);
 const BITS_PER_SYMBOL = 6;
+const CODEBOOK_MAX = 1 << BITS_PER_SYMBOL; // 64
+
+// Кодбук індексується так: [0..32]=букви (мовозалежний гліф), [33..42]=цифри,
+// [43..61]=спецсимволи, [62]=СТАРТ, [63]=PAD. Індекс символу НЕ залежить
+// від мови — залежить лише від того, ЯКИЙ гліф показати на цьому індексі.
+const NON_LETTER_CODEBOOK = DIGIT_CHARS.concat(SPECIAL_CHARS).concat([START_CHAR, PAD_CHAR]);
+const CODEBOOK_LENGTH = LETTER_SLOT_COUNT + NON_LETTER_CODEBOOK.length;
+if (CODEBOOK_LENGTH > CODEBOOK_MAX) {
+  const msg = `КРИТИЧНО: кодбук (${CODEBOOK_LENGTH} символів) перевищує межу 6-бітного символу (${CODEBOOK_MAX}). ` +
+    `Заберіть зайві символи — інакше кодування бітів мовчки зсунеться і диск стане нечитабельним.`;
+  earlyLog ? earlyLog(msg) : console.error(msg);
+  throw new Error(msg);
+}
+const START_IDX = LETTER_SLOT_COUNT + DIGIT_CHARS.length + SPECIAL_CHARS.length;
+const PAD_IDX = START_IDX + 1;
+
+function glyphTable(lang) {
+  return (lang === 'en' ? LATIN_LETTERS : CYRILLIC_LETTERS).concat(NON_LETTER_CODEBOOK);
+}
+function charToIndex(ch, lang) {
+  if (ch === START_CHAR) return START_IDX;
+  if (ch === PAD_CHAR) return PAD_IDX;
+  const table = glyphTable(lang);
+  return table.indexOf(ch);
+}
+function indexToChar(idx, lang) {
+  if (idx === START_IDX) return START_CHAR;
+  if (idx === PAD_IDX) return PAD_CHAR;
+  const table = glyphTable(lang);
+  return table[idx];
+}
+
+/* ================================================================
+   ПРАПОРЕЦЬ МОВИ — 1 виділений біт поза звичайними символьними слотами
+   ================================================================
+   Той самий 6-бітний код означає РІЗНУ літеру залежно від мови (як
+   перемикач розкладки клавіатури) — тому декодеру треба десь узяти цю
+   інформацію ДО того, як він інтерпретує індекси букв. Замість того щоб
+   міняти арифметику символьних слотів (ризиковано — вона й так на межі
+   64 кодів), прапорець мови займає ОДИН конкретний, фіксований і завжди
+   один і той самий фізичний слот — з тих, що й так завжди зарезервовані
+   й порожні (RESERVED_EACH_SIDE, буфер навколо кожної межі секції).
+   Місткість повідомлення це НЕ зменшує: цей слот ніколи не брав участі
+   в кодуванні символів.
+   Обрано: рівень 2 (найзовнішній, найдалі від маяків — нуль ризику
+   візуально накластись на бичаче око), перший зарезервований слот
+   одразу після межі секції 0 (глобальний слот rawCount*0 + 0).
+   ================================================================ */
+const LANG_FLAG_LEVEL = 2;
+const LANG_FLAG_LOCAL_SLOT = 0; // перший із RESERVED_EACH_SIDE слотів на межі секції 0
+
+const MESSAGE_CHARS_FOR_UI = { uk: CYRILLIC_LETTERS.filter(Boolean), en: LATIN_LETTERS.filter(Boolean) };
 
 const ACTIVE_BITS_PER_SECTION = LEVELS.reduce((sum, l) => sum + l.activeCount, 0);
 const DATA_SYMBOL_SLOTS = Math.floor((ACTIVE_BITS_PER_SECTION * 3) / BITS_PER_SYMBOL);
@@ -245,18 +321,21 @@ const SYMBOLS_PER_SECTION = DATA_SYMBOL_SLOTS / 3;
 const MAX_MESSAGE_LEN = DATA_SYMBOL_SLOTS - 2;
 
 document.getElementById('maxLenLabel').textContent = MAX_MESSAGE_LEN;
-const alphabet = CODEBOOK.slice(0, -2);
-const letters = alphabet.filter(c => /[А-ЯҐЄІЇ]/.test(c));
-const digits = alphabet.filter(c => /[0-9]/.test(c));
-const special = alphabet.filter(c => !/[А-ЯҐЄІЇ0-9]/.test(c));
 
-document.getElementById('blockLetters').innerHTML = '<strong>Букви:</strong> ' + letters.join(' ');
-document.getElementById('blockDigits').innerHTML = '<strong>Цифри:</strong> ' + digits.join(' ');
-document.getElementById('blockSpecial').innerHTML = '<strong>Спец:</strong> ' + special.join(' ');
+let currentLang = 'uk'; // 'uk' | 'en'
+
+function renderAlphabetBlocks() {
+  const letters = currentLang === 'en' ? MESSAGE_CHARS_FOR_UI.en : MESSAGE_CHARS_FOR_UI.uk;
+  document.getElementById('blockLetters').innerHTML = '<strong>Букви:</strong> ' + letters.join(' ');
+  document.getElementById('blockDigits').innerHTML = '<strong>Цифри:</strong> ' + DIGIT_CHARS.join(' ');
+  document.getElementById('blockSpecial').innerHTML = '<strong>Спец:</strong> ' + SPECIAL_CHARS.join(' ');
+  document.getElementById('langLabel').textContent = currentLang === 'en' ? 'латиниця' : 'кирилиця';
+  document.getElementById('langToggleBtn').textContent = currentLang === 'en' ? 'ENG' : 'УКР';
+}
 document.getElementById('capacityNote').textContent =
   `Місткість: ${ACTIVE_BITS_PER_SECTION} біт/секцію × 3 секції даних = ${DATA_SYMBOL_SLOTS} символьних слотів → максимум ${MAX_MESSAGE_LEN} символів.`;
 
-function textToSections(message) {
+function textToSections(message, lang) {
   if (message.length > MAX_MESSAGE_LEN) {
     throw new Error('Задовге повідомлення (максимум ' + MAX_MESSAGE_LEN + ')');
   }
@@ -266,10 +345,10 @@ function textToSections(message) {
   const sections = [[], [], []];
   for (let i = 0; i < DATA_SYMBOL_SLOTS; i++) {
     const ch = symbols[i];
-    const idx = CODEBOOK.indexOf(ch);
-    if (idx === -1) {
-        log('Помилка: символ "' + ch + '" не підтримується.');
-        throw new Error('Символ "' + ch + '" не підтримується.');
+    const idx = charToIndex(ch, lang);
+    if (idx === -1 || idx === undefined) {
+      log('Помилка: символ "' + ch + '" не підтримується в поточній мові.');
+      throw new Error('Символ "' + ch + '" не підтримується в поточній мові (' + lang + ').');
     }
     const bin = idx.toString(2).padStart(BITS_PER_SYMBOL, '0');
     for (const b of bin) sections[i % 3].push(b === '1' ? 1 : 0);
@@ -301,16 +380,16 @@ function sectionBitsToPhysicalLevels(sectionBitsFlat) {
   });
 }
 
-function decodeSectionsToText(sections) {
+function decodeSectionsToText(sections, lang) {
   let text = '';
   for (let pos = 0; pos < SYMBOLS_PER_SECTION; pos++) {
     for (let sec = 0; sec < 3; sec++) {
       const bits = sections[sec].slice(pos * BITS_PER_SYMBOL, (pos + 1) * BITS_PER_SYMBOL);
       const idx = parseInt(bits.join(''), 2);
-      const ch = CODEBOOK[idx];
+      const ch = indexToChar(idx, lang);
       if (ch === START_CHAR) continue;
       if (ch === PAD_CHAR) return text;
-      text += (ch === undefined) ? '?' : ch;
+      text += (ch === undefined || ch === null) ? '?' : ch;
     }
   }
   return text;
@@ -324,6 +403,7 @@ const bitsColor = document.getElementById('bitsColor');
 const anchorsColor = document.getElementById('anchorsColor');
 const centerLogoBtn = document.getElementById('centerLogoBtn');
 const clearLogoBtn = document.getElementById('clearLogoBtn');
+const langToggleBtn = document.getElementById('langToggleBtn');
 
 function drawFinder(ctx, cx, cy) {
   ctx.fillStyle = DISC_BG;
@@ -381,8 +461,14 @@ centerLogoBtn.addEventListener('click', () => {
 });
 bitsColor.addEventListener('input', refresh);
 anchorsColor.addEventListener('input', refresh);
+langToggleBtn.addEventListener('click', () => {
+  currentLang = currentLang === 'en' ? 'uk' : 'en';
+  renderAlphabetBlocks();
+  refresh();
+  log(`Мова вводу перемкнена на: ${currentLang === 'en' ? 'латиниця' : 'кирилиця'}.`);
+});
 
-function render(ctx, sections, logoImg) {
+function render(ctx, sections, logoImg, lang) {
   ctx.clearRect(0, 0, DIAGRAM, DIAGRAM);
   ctx.fillStyle = DISC_BG;
   ctx.fillRect(0, 0, DIAGRAM, DIAGRAM);
@@ -399,6 +485,12 @@ function render(ctx, sections, logoImg) {
       }
     });
   }
+
+  // Прапорець мови: форсуємо ОДИН конкретний зарезервований слот на
+  // LANG_FLAG_LEVEL — 1, якщо латиниця, 0 (порожньо), якщо кирилиця.
+  // Це відбувається ПІСЛЯ звичайного заповнення даними, тому гарантовано
+  // перезаписує (а не змішується з) те, що там і так завжди мало бути 0.
+  fullByLevel[LANG_FLAG_LEVEL][LANG_FLAG_LOCAL_SLOT] = (lang === 'en') ? 1 : 0;
 
   LEVELS.forEach((lvl, li) => drawDataRing(ctx, lvl, fullByLevel[li]));
 
@@ -456,11 +548,11 @@ function refresh() {
   counter.classList.toggle('over', text.length > MAX_MESSAGE_LEN);
 
   try {
-    currentSections = textToSections(text);
-    render(ctx, currentSections, currentLogoImg);
+    currentSections = textToSections(text, currentLang);
+    render(ctx, currentSections, currentLogoImg, currentLang);
     errorBox.textContent = '';
     downloadBtn.disabled = false;
-    log(`Намальовано: "${text}" (${text.length}/${MAX_MESSAGE_LEN} симв.)`);
+    log(`Намальовано (${currentLang}): "${text}" (${text.length}/${MAX_MESSAGE_LEN} симв.)`);
   } catch (e) {
     errorBox.textContent = e.message;
     downloadBtn.disabled = true;
@@ -471,10 +563,10 @@ logoInput.addEventListener('change', () => {
   const file = logoInput.files[0];
   if (!file) { currentLogoImg = null; refresh(); return; }
   const img = new Image();
-  img.onload = () => { 
-    currentLogoImg = img; 
+  img.onload = () => {
+    currentLogoImg = img;
     logoX = CENTER.x; logoY = CENTER.y;
-    refresh(); 
+    refresh();
   };
   img.src = URL.createObjectURL(file);
 });
@@ -499,7 +591,7 @@ canvas.addEventListener('mousemove', (e) => {
   const rect = canvas.getBoundingClientRect();
   const x = (e.clientX - rect.left) * (canvas.width / rect.width);
   const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-  
+
   const dist = Math.hypot(x - CENTER.x, y - CENTER.y);
   if (dist < LOGO_R) {
     logoX = x; logoY = y;
@@ -508,7 +600,7 @@ canvas.addEventListener('mousemove', (e) => {
     logoX = CENTER.x + Math.cos(angle) * LOGO_R;
     logoY = CENTER.y + Math.sin(angle) * LOGO_R;
   }
-  render(ctx, currentSections, currentLogoImg);
+  render(ctx, currentSections, currentLogoImg, currentLang);
 });
 canvas.addEventListener('mouseup', () => { isDragging = false; });
 canvas.addEventListener('mouseleave', () => { isDragging = false; });
@@ -598,7 +690,7 @@ setTimeout(() => {
 
 function oddify(n) { return (n % 2 === 0) ? n + 1 : n; }
 const ADAPTIVE_C = 6;
-const MIN_MARKER_AREA = 6; 
+const MIN_MARKER_AREA = 6;
 const DOT_AREA_RATIO_MIN = 0.06;
 const DOT_AREA_RATIO_MAX = 0.5;
 const CONCENTRIC_TOL = 0.4;
@@ -789,7 +881,7 @@ function reassembleWithRotation(physicalSections) {
     });
     const first6 = sections[0].slice(0, BITS_PER_SYMBOL);
     const idx = parseInt(first6.join(''), 2);
-    if (CODEBOOK[idx] === START_CHAR) {
+    if (idx === START_IDX) {
       return { sections, rot, startOk: true };
     }
   }
@@ -806,77 +898,73 @@ function checksumAgreement(sections) {
   return agree / ACTIVE_BITS_PER_SECTION;
 }
 
-let lastFrameTime = performance.now();
-let fps = 0;
-
-function sampleAllLevelsMat(imgData, W, H, pts) {
-  let src, gray, warped, thresh, trans;
-  const srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
-    pts[0].x, pts[0].y, pts[1].x, pts[1].y,
-    pts[2].x, pts[2].y, pts[3].x, pts[3].y
-  ]);
-  const dstPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
-    CENTER.x, CENTER.y - FINDER_R,
-    CENTER.x + FINDER_R, CENTER.y,
-    CENTER.x, CENTER.y + FINDER_R,
-    CENTER.x - FINDER_R, CENTER.y
-  ]);
-  const physicalSections = [];
-  for (let sec = 0; sec < SECTIONS; sec++) physicalSections.push(LEVELS.map(lvl => new Array(lvl.activeCount).fill(0)));
-  try {
-    src = cv.matFromImageData(imgData);
-    gray = new cv.Mat();
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    trans = cv.getPerspectiveTransform(srcPts, dstPts);
-    warped = new cv.Mat();
-    cv.warpPerspective(gray, warped, trans, new cv.Size(DIAGRAM, DIAGRAM));
-    thresh = new cv.Mat();
-    cv.adaptiveThreshold(warped, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 21, 5);
-    LEVELS.forEach((lvl, li) => {
-      for (let sec = 0; sec < SECTIONS; sec++) {
-        lvl.activeLocalSlots.forEach((slot, k) => {
-          const globalSlot = sec * lvl.rawCount + slot;
-          const angle = (globalSlot + 0.5) * lvl.angleStepRad;
-          const lx = CENTER.x + Math.cos(angle) * lvl.radius;
-          const ly = CENTER.y + Math.sin(angle) * lvl.radius;
-          const px = Math.round(lx);
-          const py = Math.round(ly);
-          if (px >= 0 && px < DIAGRAM && py >= 0 && py < DIAGRAM) {
-            physicalSections[sec][li][k] = thresh.ucharPtr(py, px)[0] > 128 ? 1 : 0;
-          }
-        });
-      }
-    });
-  } finally {
-    if (src) src.delete(); if (gray) gray.delete(); if (warped) warped.delete();
-    if (thresh) thresh.delete(); if (trans) trans.delete();
-    srcPts.delete(); dstPts.delete();
+/* Прапорець мови читається ТОЧНО тим самим способом (гомографія +
+   усереднення), просто для одного конкретного локального слота
+   LANG_FLAG_LOCAL_SLOT на рівні LANG_FLAG_LEVEL, а не для всього
+   набору символьних слотів. Порівнюємо з порогом ЦЬОГО Ж рівня, який
+   ми вже порахували в sampleAllLevels (levelThresholds), щоб не
+   вводити ще один окремий поріг. */
+function readLangFlag(imgData, W, H, transform, levelThresholds) {
+  const data = imgData.data;
+  function lumAt(x, y) {
+    x = Math.round(x); y = Math.round(y);
+    if (x < 0 || x >= W || y < 0 || y >= H) return 255;
+    const i = (y * W + x) * 4;
+    return data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
   }
-  return { physicalSections };
+  const lvl = LEVELS[LANG_FLAG_LEVEL];
+  const angle = (LANG_FLAG_LOCAL_SLOT + 0.5) * lvl.angleStepRad; // сектор 0, тому globalSlot === localSlot
+  const dr = TICK_WIDTH * 0.3, da = lvl.angleStepRad * 0.15;
+  const subOffsets = [{ rr: 0, aa: 0 }, { rr: dr, aa: 0 }, { rr: -dr, aa: 0 }, { rr: 0, aa: da }, { rr: 0, aa: -da }];
+  let sum = 0;
+  for (const o of subOffsets) {
+    const r = lvl.radius + o.rr, a = angle + o.aa;
+    const lx = Math.cos(a) * r, ly = Math.sin(a) * r;
+    const p = applyHomography(transform, lx, ly);
+    sum += lumAt(p.x, p.y);
+  }
+  const avg = sum / subOffsets.length;
+  const isOn = avg < levelThresholds[LANG_FLAG_LEVEL];
+  return isOn ? 'en' : 'uk';
 }
 
 function detectAndDecode(imgData, W, H, hiImgData, hiW, hiH) {
   if (!openCvReady) return { ok: false, reason: 'OpenCV ще завантажується...', mode: 'loading' };
+
   const candidates = detectBullseyeCandidates(imgData, W, H);
   let pts, scalePx, mode;
+
   if (smoothedAxis) {
     const predicted = axisToCyclicPoints(smoothedAxis.p0, smoothedAxis.p2);
     const tr = trackedFromCandidates(candidates, predicted, smoothedAxis.scalePx);
     if (tr.ok) { pts = tr.points; scalePx = smoothedAxis.scalePx; mode = 'tracked'; }
   }
+
   if (!pts) {
     const cs = coldStartFromCandidates(candidates);
     if (!cs.ok) {
       trackingMiss();
-      return { ok: false, reason: `холодний старт: ${cs.reason}`, mode: 'cold-fail' };
+      return { ok: false, reason: `${cs.reason} [маяків у кадрі: ${candidates.length}]`, mode: 'cold-fail' };
     }
     pts = cs.points; scalePx = cs.scalePx; mode = 'cold';
   }
-  const { physicalSections } = sampleAllLevelsMat(imgData, W, H, pts);
+
+  const useHiRes = hiImgData && hiW && hiH;
+  const sampleImg = useHiRes ? hiImgData : imgData;
+  const sampleW = useHiRes ? hiW : W;
+  const sampleH = useHiRes ? hiH : H;
+  const scale = useHiRes ? (hiW / W) : 1;
+  const samplePts = useHiRes ? pts.map(p => ({ x: p.x * scale, y: p.y * scale })) : pts;
+
+  const transform = solveHomography(LOCAL_ANCHORS, samplePts);
+  const { physicalSections, levelThresholds } = sampleAllLevels(sampleImg, sampleW, sampleH, transform);
   const { sections, startOk } = reassembleWithRotation(physicalSections);
   const agreement = checksumAgreement(sections);
+  const lang = readLangFlag(sampleImg, sampleW, sampleH, transform, levelThresholds);
+
   updateAxisState(pts, scalePx);
-  return { ok: true, mode, pts, scalePx, sections, startOk, agreement };
+
+  return { ok: true, mode, pts, scalePx, transform, sections, startOk, agreement, lang };
 }
 
 const AXIS_EMA_ALPHA = 0.35;
@@ -1059,6 +1147,7 @@ function escapeHtml(s) {
   return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+let frameCounter = 0;
 function scanFrame() {
   if (locked) return;
   const video = document.getElementById('camVideo');
@@ -1066,45 +1155,73 @@ function scanFrame() {
   if (!camStream || video.readyState < 2) return;
 
   const loSize = wrap.clientWidth || 320;
-  const hiSize = Math.min(Math.min(video.videoWidth, video.videoHeight), 640);
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const hiSize = vw && vh ? Math.min(Math.min(vw, vh), 640) : loSize;
+
   const hiCanvas = document.createElement('canvas');
   hiCanvas.width = hiSize; hiCanvas.height = hiSize;
   const hctx = hiCanvas.getContext('2d', { willReadFrequently: true });
-  hctx.drawImage(video, (video.videoWidth-hiSize)/2, (video.videoHeight-hiSize)/2, hiSize, hiSize, 0, 0, hiSize, hiSize);
+  if (vw && vh) {
+    const sSize = Math.min(vw, vh);
+    const sx = (vw - sSize) / 2, sy = (vh - sSize) / 2;
+    hctx.drawImage(video, sx, sy, sSize, sSize, 0, 0, hiSize, hiSize);
+  } else {
+    hctx.drawImage(video, 0, 0, hiSize, hiSize);
+  }
   const hiImgData = hctx.getImageData(0, 0, hiSize, hiSize);
+
   const loCanvas = document.createElement('canvas');
   loCanvas.width = loSize; loCanvas.height = loSize;
   const cctx = loCanvas.getContext('2d', { willReadFrequently: true });
   cctx.drawImage(hiCanvas, 0, 0, hiSize, hiSize, 0, 0, loSize, loSize);
   const imgData = cctx.getImageData(0, 0, loSize, loSize);
-  const det = detectAndDecode(imgData, loSize, loSize, hiImgData, hiSize, hiSize);
+
+  const size = loSize;
+  const det = detectAndDecode(imgData, size, size, hiImgData, hiSize, hiSize);
+  frameCounter++;
 
   if (!det.ok) {
     recentCentroids = []; recentTexts = [];
-    drawLiveOverlay(loSize, loSize, det, `Шукаю якорі...`);
+    drawLiveOverlay(size, size, det, `Шукаю якорі... (${det.reason})`);
+    document.getElementById('camStatus').textContent = `Пошук: ${det.reason}`;
+    if (frameCounter % 5 === 0) log(`Кадр ${frameCounter}: ${det.reason}`);
     return;
   }
   if (!det.startOk || det.agreement < MIN_AGREEMENT) {
     recentCentroids = []; recentTexts = [];
-    drawLiveOverlay(loSize, loSize, det, `Маяки знайдено...`);
+    const reason = !det.startOk ? 'старт-символ не збігається' : `узгодженість чексуми ${(det.agreement*100).toFixed(0)}%`;
+    drawLiveOverlay(size, size, det, `Маяки знайдено (${det.mode}), ${reason}`);
+    document.getElementById('camStatus').textContent = `Кандидат — ${reason}, шукаю стабільніший кадр...`;
     return;
   }
 
-  const votedText = decodeSectionsToText(det.sections);
+  let votedText;
+  try {
+    votedText = decodeSectionsToText(det.sections, det.lang);
+  } catch (e) {
+    votedText = '';
+  }
   const centroid = centroidOf(det.pts);
-  const stable = checkStability(centroid, votedText);
+  const stable = checkStability(centroid, votedText + '|' + det.lang);
 
-  drawLiveOverlay(loSize, loSize, det, stable ? 'Стабільно...' : `Стабілізація...`);
+  drawLiveOverlay(size, size, det, stable ? 'Стабільно, декодую...' : `Стабілізація... (${recentCentroids.length}/${CONFIRM_STREAK}) [${det.mode}, ${det.lang}]`);
+  document.getElementById('camStatus').textContent = stable
+    ? 'Впевнено знайдено — декодую.'
+    : `Кандидат (чексума ${(det.agreement*100).toFixed(0)}%, ${det.mode}, ${det.lang}) — стабілізація ${recentCentroids.length}/${CONFIRM_STREAK}`;
+
   if (stable) {
     locked = true;
-    finishDecode(loSize, loSize, det, votedText);
+    log(`Зафіксовано: режим=${det.mode}, мова=${det.lang}, чексума=${(det.agreement*100).toFixed(1)}%, текст="${votedText}".`);
+    finishDecode(size, size, det, votedText);
   }
 }
 
 function finishDecode(W, H, det, votedText) {
   drawDecodedOverlay(W, H, det);
   const upperText = votedText.toUpperCase();
-  document.getElementById('camResultsBox').innerHTML = `<div class="final-result">${escapeHtml(upperText)}</div>`;
+  document.getElementById('camResultsBox').innerHTML =
+    `<div class="capacity-note" style="margin-bottom:6px;">Мова: ${det.lang === 'en' ? 'латиниця' : 'кирилиця'}</div>` +
+    `<div class="final-result">${escapeHtml(upperText)}</div>`;
   document.getElementById('rescanBtn').style.display = 'block';
   log(`Результат: ${upperText}`);
 }
@@ -1123,6 +1240,7 @@ document.getElementById('rescanBtn').addEventListener('click', rescan);
 document.getElementById('copyLogBtn').addEventListener('click', () => { navigator.clipboard.writeText(document.getElementById('logBox').value); });
 document.getElementById('clearLogBtn').addEventListener('click', () => { document.getElementById('logBox').value = ''; });
 
+renderAlphabetBlocks();
 refresh();
 </script>
 
