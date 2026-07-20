@@ -6,28 +6,7 @@
 <title>Round Code — Енкодер + Декодер</title>
 <script>
 /* ================================================================
-   БУТСТРАП ЗАВАНТАЖЕННЯ OPENCV — окремо, ДО тега <script src="opencv.js">
-   ================================================================
-   Причина, чому це окремий блок ПЕРЕД підключенням opencv.js, а не
-   всередині головного скрипта внизу сторінки: тег нижче має
-   async + onload="onOpenCvScriptLoaded()". Якщо opencv.js (1.9МБ)
-   завантажиться швидко (локальний файл, кеш, швидка мережа), подія
-   onload може спрацювати РАНІШЕ, ніж браузер дійде до розбору
-   головного <script> внизу body, де раніше й була визначена функція
-   onOpenCvScriptLoaded. У такому разі onload намагається викликати
-   ще не оголошену функцію — ReferenceError, який осідає в консолі
-   браузера мовчки, у наш власний UI-лог НІКОЛИ не потрапляючи. Це і
-   виглядає як "OpenCV взагалі не завантажується" ззовні, хоча файл
-   насправді підвантажився нормально. Визначаючи обробники тут, ДО
-   тега підключення, ми гарантуємо, що вони існують до будь-якої події.
-
-   Друга річ, яку це виправляє: ця збірка opencv.js — MODULARIZE-варіант
-   (Emscripten), у якому глобальний `cv` після виконання скрипта — це
-   НЕ готовий об'єкт з методом onRuntimeInitialized, а Promise, що
-   резолвиться в готовий cv лише після компіляції WASM. Старий патерн
-   `cv['onRuntimeInitialized'] = ...` для такої збірки взагалі нічого
-   не робить (просто ставить властивість на Promise). Тому нижче —
-   гілка на обидва варіанти збірки.
+   БУТСТРАП ЗАВАНТАЖЕННЯ OPENCV
 */
 window.__preLog = [];
 window.__openCvLoadState = 'pending';
@@ -102,6 +81,7 @@ label { font-size: 13px; font-weight: 500; color: rgba(255,255,255,0.85); }
 input[type="text"] {
   width: 100%; padding: 12px 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2);
   background: rgba(0,0,0,0.2); color: #fff; font-size: 15px; outline: none;
+  text-transform: uppercase;
 }
 input[type="text"]:focus { border-color: rgba(255,255,255,0.6); }
 input[type="file"] { color: rgba(255,255,255,0.75); font-size: 13px; padding: 4px 0; }
@@ -138,33 +118,43 @@ textarea { width: 100%; height: 180px; font-family: monospace; font-size: 11px; 
 <body>
 
 <h1>Round Code</h1>
-<div class="subtitle">5 орбіт · 4 маяки на середній орбіті · OpenCV вкладені контури</div>
+<div class="subtitle">3 орбіти · 4 маяки на середній орбіті · OpenCV вкладені контури</div>
 
 <div class="panel">
   <h2>Енкодер</h2>
   <div class="input-group">
-    <div class="counter-row">
-      <label for="msgInput">Повідомлення (до <span id="maxLenLabel"></span> символів)</label>
-      <div class="counter" id="counter">0 / 0</div>
+  <div class="counter-row">
+    <label for="msgInput">Повідомлення (до <span id="maxLenLabel"></span> символів)</label>
+    <div class="counter" id="counter">0 / 0</div>
+  </div>
+  <input type="text" id="msgInput" placeholder="Я ТЕБЕ КОХАЮ" />
+  <div class="capacity-note">
+    <div style="margin-bottom:4px;">Доступні символи:</div>
+    <div id="alphabetBlocks" style="color: #fff; font-family: monospace; display: flex; flex-direction: column; gap: 4px;">
+      <div id="blockLetters"></div>
+      <div id="blockDigits"></div>
+      <div id="blockSpecial"></div>
     </div>
-    <input type="text" id="msgInput" placeholder="Я ТЕБЕ КОХАЮ" />
+  </div>
   </div>
 
   <div class="input-group">
     <label for="logoInput">Лого в центр (PNG, JPEG)</label>
-    <div style="display: flex; gap: 8px;">
-      <input type="file" id="logoInput" accept="image/png, image/jpeg" style="flex: 1;" />
-      <button class="secondary" id="centerLogoBtn" style="padding: 4px 8px; font-size: 12px;">Центр</button>
-      <button class="secondary" id="clearLogoBtn" style="padding: 4px 8px; font-size: 12px;">Очистити</button>
+    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+      <input type="file" id="logoInput" accept="image/png, image/jpeg" style="flex: 1; min-width: 150px;" />
+      <div style="display: flex; gap: 4px;">
+        <button class="secondary" id="centerLogoBtn" style="padding: 4px 8px; font-size: 12px; white-space: nowrap;">Центр</button>
+        <button class="secondary" id="clearLogoBtn" style="padding: 4px 8px; font-size: 12px; white-space: nowrap;">Очистити</button>
+      </div>
     </div>
   </div>
 
-  <div class="input-group" style="display: flex; flex-direction: row; gap: 10px;">
-    <div style="flex: 1;">
+  <div class="input-group" style="display: flex; flex-direction: row; gap: 10px; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 120px;">
       <label for="bitsColor">Колір бітів</label>
       <input type="color" id="bitsColor" value="#000000" style="height: 30px; width: 100%;" />
     </div>
-    <div style="flex: 1;">
+    <div style="flex: 1; min-width: 120px;">
       <label for="anchorsColor">Колір якорів</label>
       <input type="color" id="anchorsColor" value="#000000" style="height: 30px; width: 100%;" />
     </div>
@@ -210,14 +200,14 @@ textarea { width: 100%; height: 180px; font-family: monospace; font-size: 11px; 
    ================================================================ */
 const DIAGRAM = 500;
 const CENTER = { x: DIAGRAM / 2, y: DIAGRAM / 2 };
-const LOGO_R = 128; // Розширено до радіуса попередньої середньої орбіти
+const LOGO_R = 128;
 const LEVEL_RADII = [156, 184, 212];
-const FINDER_LEVEL = 1; // Середня орбіта (індекс 1 з 3)
+const FINDER_LEVEL = 1;
 const FINDER_R = LEVEL_RADII[FINDER_LEVEL];
 const TICK_WIDTH = 7;
 const SECTIONS = 4;
 const QUADRANT_CENTER_DEG = [0, 90, 180, 270];
-const ACTIVE_PER_LEVEL = [12, 18, 24]; // Оновлено для 3 рівнів
+const ACTIVE_PER_LEVEL = [12, 18, 24];
 const RESERVED_EACH_SIDE = 2;
 
 const FINDER_OUTER_RADIUS = 13;
@@ -243,7 +233,7 @@ function levelGeometry(levelIndex) {
 }
 const LEVELS = ACTIVE_PER_LEVEL.map((_, i) => levelGeometry(i));
 
-const MESSAGE_CHARS = "АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ0123456789 .,'!?-".split('');
+const MESSAGE_CHARS = "АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ0123456789 .,@'+-".split('');
 const START_CHAR = '\u0001';
 const PAD_CHAR = '\u0002';
 const CODEBOOK = MESSAGE_CHARS.concat([START_CHAR, PAD_CHAR]);
@@ -255,6 +245,14 @@ const SYMBOLS_PER_SECTION = DATA_SYMBOL_SLOTS / 3;
 const MAX_MESSAGE_LEN = DATA_SYMBOL_SLOTS - 2;
 
 document.getElementById('maxLenLabel').textContent = MAX_MESSAGE_LEN;
+const alphabet = CODEBOOK.slice(0, -2);
+const letters = alphabet.filter(c => /[А-ЯҐЄІЇ]/.test(c));
+const digits = alphabet.filter(c => /[0-9]/.test(c));
+const special = alphabet.filter(c => !/[А-ЯҐЄІЇ0-9]/.test(c));
+
+document.getElementById('blockLetters').innerHTML = '<strong>Букви:</strong> ' + letters.join(' ');
+document.getElementById('blockDigits').innerHTML = '<strong>Цифри:</strong> ' + digits.join(' ');
+document.getElementById('blockSpecial').innerHTML = '<strong>Спец:</strong> ' + special.join(' ');
 document.getElementById('capacityNote').textContent =
   `Місткість: ${ACTIVE_BITS_PER_SECTION} біт/секцію × 3 секції даних = ${DATA_SYMBOL_SLOTS} символьних слотів → максимум ${MAX_MESSAGE_LEN} символів.`;
 
@@ -269,7 +267,10 @@ function textToSections(message) {
   for (let i = 0; i < DATA_SYMBOL_SLOTS; i++) {
     const ch = symbols[i];
     const idx = CODEBOOK.indexOf(ch);
-    if (idx === -1) throw new Error('Символ поза алфавітом: "' + ch + '"');
+    if (idx === -1) {
+        log('Помилка: символ "' + ch + '" не підтримується.');
+        throw new Error('Символ "' + ch + '" не підтримується.');
+    }
     const bin = idx.toString(2).padStart(BITS_PER_SYMBOL, '0');
     for (const b of bin) sections[i % 3].push(b === '1' ? 1 : 0);
   }
@@ -291,6 +292,15 @@ function sectionBitsToLevels(sectionBitsFlat) {
   return levels;
 }
 
+function sectionBitsToPhysicalLevels(sectionBitsFlat) {
+  const levelBits = sectionBitsToLevels(sectionBitsFlat);
+  return LEVELS.map((lvl, i) => {
+    const physical = new Array(lvl.rawCount).fill(0);
+    lvl.activeLocalSlots.forEach((slot, k) => { physical[slot] = levelBits[i][k]; });
+    return physical;
+  });
+}
+
 function decodeSectionsToText(sections) {
   let text = '';
   for (let pos = 0; pos < SYMBOLS_PER_SECTION; pos++) {
@@ -306,12 +316,14 @@ function decodeSectionsToText(sections) {
   return text;
 }
 
+
 /* ================================================================
    МАЛЮВАННЯ ЕНКОДЕРА
    ================================================================ */
 const bitsColor = document.getElementById('bitsColor');
 const anchorsColor = document.getElementById('anchorsColor');
 const centerLogoBtn = document.getElementById('centerLogoBtn');
+const clearLogoBtn = document.getElementById('clearLogoBtn');
 
 function drawFinder(ctx, cx, cy) {
   ctx.fillStyle = DISC_BG;
@@ -363,23 +375,12 @@ function drawDataRing(ctx, lvl, full) {
   }
 }
 
-// ... в кінці script ...
 centerLogoBtn.addEventListener('click', () => {
   logoX = CENTER.x; logoY = CENTER.y;
   refresh();
 });
 bitsColor.addEventListener('input', refresh);
 anchorsColor.addEventListener('input', refresh);
-
-
-function sectionBitsToPhysicalLevels(sectionBitsFlat) {
-  const levelBits = sectionBitsToLevels(sectionBitsFlat);
-  return LEVELS.map((lvl, i) => {
-    const physical = new Array(lvl.rawCount).fill(0);
-    lvl.activeLocalSlots.forEach((slot, k) => { physical[slot] = levelBits[i][k]; });
-    return physical;
-  });
-}
 
 function render(ctx, sections, logoImg) {
   ctx.clearRect(0, 0, DIAGRAM, DIAGRAM);
@@ -421,7 +422,7 @@ function render(ctx, sections, logoImg) {
     ctx.fillRect(CENTER.x - LOGO_R, CENTER.y - LOGO_R, LOGO_R * 2, LOGO_R * 2);
   }
   ctx.restore();
-  }
+}
 
 /* ================================================================
    ЛОГ
@@ -512,33 +513,6 @@ canvas.addEventListener('mousemove', (e) => {
 canvas.addEventListener('mouseup', () => { isDragging = false; });
 canvas.addEventListener('mouseleave', () => { isDragging = false; });
 
-canvas.addEventListener('mousedown', (e) => {
-  if (!currentLogoImg) return;
-  const rect = canvas.getBoundingClientRect();
-  const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-  const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-  if (Math.hypot(x - CENTER.x, y - CENTER.y) < LOGO_R) {
-    isDragging = true;
-  }
-});
-canvas.addEventListener('mousemove', (e) => {
-  if (!isDragging) return;
-  const rect = canvas.getBoundingClientRect();
-  const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-  const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-  
-  const dist = Math.hypot(x - CENTER.x, y - CENTER.y);
-  if (dist < LOGO_R) {
-    logoX = x; logoY = y;
-  } else {
-    const angle = Math.atan2(y - CENTER.y, x - CENTER.x);
-    logoX = CENTER.x + Math.cos(angle) * LOGO_R;
-    logoY = CENTER.y + Math.sin(angle) * LOGO_R;
-  }
-  render(ctx, currentSections, currentLogoImg);
-});
-canvas.addEventListener('mouseup', () => { isDragging = false; });
-canvas.addEventListener('mouseleave', () => { isDragging = false; });
 function solveLinearSystem(A, b) {
   const n = b.length;
   const M = A.map(row => row.slice());
@@ -584,25 +558,8 @@ const LOCAL_ANCHORS = getLocalAnchors();
 
 function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
-/* ================================================================
-   OPENCV: ПОШУК БИЧАЧОГО ОКА ЧЕРЕЗ ІЄРАРХІЮ ВКЛАДЕНИХ КОНТУРІВ
-   ================================================================
-   Кільце+проміжок+крапка при бінаризації дають 3 вкладені контури:
-   зовнішня межа кільця (рівень 0) → межа проміжку/діри (рівень 1,
-   дитина) → межа крапки (рівень 2, онук). RETR_TREE будує цю
-   вкладеність незалежно від того, торкаються пікселі одне одного чи
-   ні — це набагато надійніший і МАСШТАБО-НЕЗАЛЕЖНИЙ фільтр форми, ніж
-   попередній ручний flood-fill + радіальні промені: жодного вгадування
-   очікуваного розміру маяка не потрібно, OpenCV повертає точний
-   радіус кожного знайденого контуру одразу. */
 let openCvReady = false;
 
-/* Обробники завантаження OpenCV визначені раніше, у <head>, ДО тега
-   <script src="opencv.js"> (див. коментар там) — саме щоб не залежати
-   від того, коли браузер розпарсить цей, головний, скрипт. Тут ми лише
-   підписуємось на результат через window.__cvReadyCallback/__cvErrorCallback
-   і одразу перевіряємо window.__openCvLoadState — можливо, все вже
-   встигло завантажитись (або впасти з помилкою) до цього моменту. */
 function flushPreLoadLog() {
   if (window.__preLog && window.__preLog.length) {
     window.__preLog.forEach(m => log(m));
@@ -620,15 +577,12 @@ function onCvReady() {
 }
 function onCvLoadError() {
   flushPreLoadLog();
-  log('OpenCV НЕ завантажився. Камера лишається заблокованою. Дивіться повідомлення вище — там точна причина (шлях, назва файлу, невалідна збірка, помилка WASM).');
+  log('OpenCV НЕ завантажився. Камера лишається заблокованою.');
   document.getElementById('camStatus').textContent = 'OpenCV не завантажився — див. лог.';
   document.getElementById('camPlaceholder').textContent = 'OpenCV не завантажився — див. лог';
 }
 window.__cvReadyCallback = onCvReady;
 window.__cvErrorCallback = onCvLoadError;
-// На випадок, якщо cv вже встиг стати готовим (або впасти з помилкою) ДО
-// того, як браузер дійшов до виконання цього блоку — стан уже записаний
-// у window.__openCvLoadState бутстрапом у <head>, перевіряємо його напряму.
 if (window.__openCvLoadState === 'ready') {
   onCvReady();
 } else if (window.__openCvLoadState === 'script-error' || window.__openCvLoadState === 'cv-undefined' || window.__openCvLoadState === 'promise-rejected') {
@@ -636,29 +590,22 @@ if (window.__openCvLoadState === 'ready') {
 } else {
   flushPreLoadLog();
 }
-// Watchdog: якщо через 12с після старту сторінки OpenCV все ще не готовий
-// і жодної помилки не зафіксовано — щось зависло мовчки (наприклад,
-// WASM компілюється довго на слабкому пристрої, або мережа "висить" без
-// явної помилки). Друкуємо явний сигнал замість вічної тиші в UI.
 setTimeout(() => {
   if (!openCvReady) {
-    log(`Попередження: OpenCV досі не готовий через 12с (стан: ${window.__openCvLoadState}). ` +
-      `Якщо стан "pending" або "script-loaded" — WASM ще компілюється (чекайте, особливо на слабких пристроях/мобільних). ` +
-      `Якщо стан "script-error" — перевірте назву й розташування файлу opencv.js. Перевірте також консоль розробника (F12) на CORS-помилки, якщо сторінка відкрита не з file://, а з сервера.`);
+    log(`Попередження: OpenCV досі не готовий через 12с (стан: ${window.__openCvLoadState}).`);
   }
 }, 12000);
 
 function oddify(n) { return (n % 2 === 0) ? n + 1 : n; }
 const ADAPTIVE_C = 6;
-const MIN_MARKER_AREA = 6; // px² — грубий поперед-фільтр, справжній фільтр нижче
+const MIN_MARKER_AREA = 6; 
 const DOT_AREA_RATIO_MIN = 0.06;
-const DOT_AREA_RATIO_MAX = 0.5; // очікувано ~0.213 (6/13)^2, з великим запасом на розмиття/перспективу
-const CONCENTRIC_TOL = 0.4; // максимальний зсув центру крапки від центру кільця, як частка радіуса
+const DOT_AREA_RATIO_MAX = 0.5;
+const CONCENTRIC_TOL = 0.4;
 
-/* Повертає масив {x, y, radius} для КОЖНОГО підтвердженого маяка в кадрі. */
 function detectBullseyeCandidates(imgData, W, H) {
   let src, gray, bin, hierarchy, contours;
-  let contourMats = []; // Перенесено сюди, щоб блок finally мав доступ
+  let contourMats = [];
   const candidates = [];
   try {
     src = cv.matFromImageData(imgData);
@@ -674,7 +621,7 @@ function detectBullseyeCandidates(imgData, W, H) {
 
     const n = contours.size();
     for (let i = 0; i < n; i++) contourMats.push(contours.get(i));
-    const hData = hierarchy.data32S; // [next, prev, firstChild, parent] * n
+    const hData = hierarchy.data32S;
 
     for (let i = 0; i < n; i++) {
       const area = cv.contourArea(contourMats[i]);
@@ -700,7 +647,6 @@ function detectBullseyeCandidates(imgData, W, H) {
     }
 
   } finally {
-    // Безпечне і гарантоване очищення масиву контурів C++ у будь-якій ситуації
     if (contourMats && contourMats.length > 0) {
       contourMats.forEach(m => {
         if (m && typeof m.delete === 'function') m.delete();
@@ -715,9 +661,6 @@ function detectBullseyeCandidates(imgData, W, H) {
   return candidates;
 }
 
-/* ================================================================
-   ЗАХОПЛЕННЯ ТА ТРИМАННЯ: осьова геометрія поверх кандидатів OpenCV
-   ================================================================ */
 function axisToCyclicPoints(p0, p2) {
   const mx = (p0.x + p2.x) / 2, my = (p0.y + p2.y) / 2;
   const dx = p2.x - p0.x, dy = p2.y - p0.y;
@@ -743,13 +686,6 @@ const COLD_DIST_MIN_RATIO = 0.55;
 const COLD_DIST_MAX_RATIO = 2.0;
 const SIDE_MATCH_TOL_FACTOR = 0.8;
 
-/* Якір = найнижчий кандидат (камера "цілиться" знизу вгору за задумом).
-   Пара шукається віялом ±75° від "вгору" в діапазоні очікуваної відстані,
-   яка обчислюється з ВЛАСНОГО радіуса якоря (фіксоване співвідношення
-   дизайну FINDER_R*2/FINDER_OUTER_RADIUS) — не з вгаданої константи.
-   Бокові маяки не шукаються повторним скануванням пікселів: вони
-   обчислюються геометрично з осі і звіряються з уже наявним списком
-   кандидатів (той самий прохід detectBullseyeCandidates на весь кадр). */
 function coldStartFromCandidates(candidates) {
   if (candidates.length < 2) {
     return { ok: false, reason: `замало підтверджених маяків (${candidates.length})` };
@@ -770,7 +706,7 @@ function coldStartFromCandidates(candidates) {
     if (diff < bestDiff) { bestDiff = diff; best2 = c; }
   }
   if (!best2) {
-    return { ok: false, reason: `якір є (r=${p0.radius.toFixed(1)}px, оцінка відстані ${distEstimate.toFixed(0)}px), пари не знайдено серед ${candidates.length} маяків` };
+    return { ok: false, reason: `якір є (r=${p0.radius.toFixed(1)}px), пари не знайдено` };
   }
 
   const cyclic = axisToCyclicPoints(p0, best2);
@@ -778,14 +714,11 @@ function coldStartFromCandidates(candidates) {
   const side1 = nearestCandidate(candidates, cyclic[1], tol);
   const side3 = nearestCandidate(candidates, cyclic[3], tol);
   if (!side1 || !side3) {
-    return { ok: false, reason: 'вісь знайдена, бокові маяки не підтверджені реальними контурами (ймовірно, хибна пара)' };
+    return { ok: false, reason: 'вісь знайдена, бокові маяки не підтверджені' };
   }
   return { ok: true, points: [p0, side1, best2, side3], scalePx: p0.radius };
 }
 
-/* Тримання: маємо згладжену вісь з попереднього кадру — просто шукаємо
-   найближчого реального кандидата до кожної з 4 передбачених позицій.
-   Жодного повторного геометричного пошуку пари — тільки зіставлення. */
 function trackedFromCandidates(candidates, predictedPts, scalePx) {
   const tol = Math.max(12, scalePx * 0.9);
   const found = predictedPts.map(p => nearestCandidate(candidates, p, tol));
@@ -793,25 +726,6 @@ function trackedFromCandidates(candidates, predictedPts, scalePx) {
   return { ok: true, points: found };
 }
 
-/* ================================================================
-   СЕМПЛІНГ БІТ ПО ДУГАХ + ВИЗНАЧЕННЯ ОРІЄНТАЦІЇ ЗА СТАРТ-СИМВОЛОМ
-   ================================================================ */
-/* Раніше: 1 піксель на біт + 1 поріг на весь кадр. Обидва — джерела
-   похибки, яку гомографія сама по собі виправити не може (вона задає
-   ПРАВИЛЬНУ проекцію, але фінальний прочитаний біт все одно залежить
-   від того, як ми семплимо навколо цієї точки):
-   1) Точкове семплювання: щонайменша похибка 4 калібрувальних точок
-      (навіть у частку пікселя) найбільше зміщує зовнішні, щільніші
-      кільця — там сусідній слот може опинитись за 1-2px, і одна точка
-      може випадково влучити не туди. Тепер на кожен слот беремо 5
-      підточок (центр + зсуви по радіусу і куту в межах штриха, який
-      сам енкодер малює) і усереднюємо яскравість — це набагато
-      стійкіше до дрібної похибки вирівнювання й шуму камери.
-   2) Один глобальний поріг: при нахиленому диску або напрямленому
-      світлі яскравість природно "пливе" від центру до краю — поріг,
-      порахований на весь кадр разом, буде трохи не точним і в центрі,
-      і на краю. Порахований ОКРЕМО для кожного рівня (кільця) —
-      значно ближчий до реальної яскравості саме в тому кільці. */
 function sampleAllLevels(imgData, W, H, transform) {
   const data = imgData.data;
   function lumAt(x, y) {
@@ -823,8 +737,8 @@ function sampleAllLevels(imgData, W, H, transform) {
 
   const points = [];
   LEVELS.forEach((lvl, li) => {
-    const dr = TICK_WIDTH * 0.3;            // зсув по радіусу — в межах товщини штриха
-    const da = lvl.angleStepRad * 0.15;     // зсув по куту — в межах активної дуги слота
+    const dr = TICK_WIDTH * 0.3;
+    const da = lvl.angleStepRad * 0.15;
     for (let sec = 0; sec < SECTIONS; sec++) {
       lvl.activeLocalSlots.forEach((slot, k) => {
         const globalSlot = sec * lvl.rawCount + slot;
@@ -842,7 +756,6 @@ function sampleAllLevels(imgData, W, H, transform) {
     }
   });
 
-  // усереднена яскравість кожного слота (по 5 підточках), плюс поріг ОКРЕМО на рівень
   const levelLums = LEVELS.map(() => ({ min: 255, max: 0 }));
   const slotLums = points.map(pt => {
     let sum = 0;
@@ -893,17 +806,11 @@ function checksumAgreement(sections) {
   return agree / ACTIVE_BITS_PER_SECTION;
 }
 
-/* ================================================================
-   ГОЛОВНИЙ ЦИКЛ ДЕТЕКЦІЇ: тримання → холодний старт як fallback
-   ================================================================ */
-// Додано: змінні для вимірювання продуктивності
 let lastFrameTime = performance.now();
 let fps = 0;
-let lastLogFrame = 0;
 
 function sampleAllLevelsMat(imgData, W, H, pts) {
   let src, gray, warped, thresh, trans;
-  const t0 = performance.now();
   const srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
     pts[0].x, pts[0].y, pts[1].x, pts[1].y,
     pts[2].x, pts[2].y, pts[3].x, pts[3].y
@@ -940,11 +847,6 @@ function sampleAllLevelsMat(imgData, W, H, pts) {
         });
       }
     });
-    const t1 = performance.now();
-    // Логування тільки кожні 20 кадрів для економії місця
-    if (frameCounter % 20 === 0) {
-      log(`Read: ${(t1 - t0).toFixed(1)}ms | FPS: ${fps.toFixed(0)}`);
-    }
   } finally {
     if (src) src.delete(); if (gray) gray.delete(); if (warped) warped.delete();
     if (thresh) thresh.delete(); if (trans) trans.delete();
@@ -952,19 +854,6 @@ function sampleAllLevelsMat(imgData, W, H, pts) {
   }
   return { physicalSections };
 }
-
-// Функція для оновлення FPS
-function updateFPS() {
-  const now = performance.now();
-  fps = 1000 / (now - lastFrameTime);
-  lastFrameTime = now;
-  // Оновлення UI
-  const status = document.getElementById('camStatus');
-  if (status) {
-    status.setAttribute('data-fps', fps.toFixed(0));
-  }
-}
-// У scanFrame додати виклик updateFPS() на початку.
 
 function detectAndDecode(imgData, W, H, hiImgData, hiW, hiH) {
   if (!openCvReady) return { ok: false, reason: 'OpenCV ще завантажується...', mode: 'loading' };
@@ -979,7 +868,7 @@ function detectAndDecode(imgData, W, H, hiImgData, hiW, hiH) {
     const cs = coldStartFromCandidates(candidates);
     if (!cs.ok) {
       trackingMiss();
-      return { ok: false, reason: `${cs.reason} [маяків у кадрі: ${candidates.length}]`, mode: 'cold-fail', candidateCount: candidates.length };
+      return { ok: false, reason: `холодний старт: ${cs.reason}`, mode: 'cold-fail' };
     }
     pts = cs.points; scalePx = cs.scalePx; mode = 'cold';
   }
@@ -987,12 +876,9 @@ function detectAndDecode(imgData, W, H, hiImgData, hiW, hiH) {
   const { sections, startOk } = reassembleWithRotation(physicalSections);
   const agreement = checksumAgreement(sections);
   updateAxisState(pts, scalePx);
-  return { ok: true, mode, pts, scalePx, sections, startOk, agreement, candidateCount: candidates.length };
+  return { ok: true, mode, pts, scalePx, sections, startOk, agreement };
 }
 
-/* ================================================================
-   ЗГЛАДЖУВАННЯ ОСІ (EMA) — для передбачення позицій між кадрами
-   ================================================================ */
 const AXIS_EMA_ALPHA = 0.35;
 const TRACK_LOST_AFTER = 6;
 let smoothedAxis = null;
@@ -1019,12 +905,6 @@ function trackingMiss() {
 function resetTracking() { smoothedAxis = null; trackMissCount = 0; }
 
 const CONFIRM_STREAK = 3;
-// Піднято з 0.85: у тесті кадр з узгодженістю 85.9% дав 3 стабільні
-// кадри поспіль з ОДНАКОВО неправильним текстом ("КОХА?" замість
-// "КОХАЮ") — тобто систематична, а не випадкова помилка гомографії в
-// конкретному положенні камери, яка пройшла перевірку стабільності
-// (та перевіряє лише "чи однаковий текст 3 кадри поспіль", не "чи він
-// правильний"). Вищий поріг менш охоче фіксує межові кадри.
 const MIN_AGREEMENT = 0.93;
 const STABILITY_TOL_PX = 14;
 let recentCentroids = [];
@@ -1045,16 +925,10 @@ function checkStability(centroid, text) {
   return true;
 }
 
-/* ================================================================
-   КАМЕРА
-   ================================================================ */
 let camStream = null;
 let scanTimer = null;
 let locked = false;
 
-/* Статичний приціл: коло "тримайте диск у межах цього кола" (пунктирне, тонке), + хрестик по центру.
-   Навколо кола — затемнення (маска).
-   Малюється ОДИН РАЗ при старті камери. */
 function drawGuide(W, H) {
   const gc = document.getElementById('guideCanvas');
   gc.width = W; gc.height = H;
@@ -1063,38 +937,28 @@ function drawGuide(W, H) {
   const cx = W / 2, cy = H / 2;
   const beaconR = Math.min(W, H) * 0.42 * (FINDER_R / 225);
 
-  // 1. Малюємо затемнення
   g.fillStyle = 'rgba(0,0,0,0.6)';
   g.fillRect(0, 0, W, H);
-
-  // 2. Вирізаємо коло
   g.globalCompositeOperation = 'destination-out';
   g.fillStyle = '#000';
   g.beginPath(); g.arc(cx, cy, beaconR, 0, Math.PI * 2); g.fill();
   g.globalCompositeOperation = 'source-over';
-
-  // 3. Малюємо рамку та хрестик поверх маски
   g.save();
-  // Тонке біле пунктирне коло
   g.setLineDash([4, 4]);
   g.lineWidth = 1.5;
   g.strokeStyle = '#ffffff';
   g.beginPath(); g.arc(cx, cy, beaconR, 0, Math.PI * 2); g.stroke();
   g.restore();
-
-  // Хрестик по центру
   g.strokeStyle = 'rgba(255,255,255,0.4)';
   g.lineWidth = 1;
   g.beginPath();
   g.moveTo(cx - 8, cy); g.lineTo(cx + 8, cy);
   g.moveTo(cx, cy - 8); g.lineTo(cx, cy + 8);
   g.stroke();
-
   g.font = '11px monospace';
   g.textAlign = 'center';
   g.fillStyle = 'rgba(255,255,255,0.5)';
-  const labelY = (cy + beaconR + 16 < H - 4) ? cy + beaconR + 16 : cy - beaconR - 8;
-  g.fillText('тримайте диск у межах кола', cx, labelY);
+  g.fillText('тримайте диск у межах кола', cx, (cy + beaconR + 16 < H - 4) ? cy + beaconR + 16 : cy - beaconR - 8);
 }
 function clearGuide() {
   const gc = document.getElementById('guideCanvas');
@@ -1111,7 +975,6 @@ async function toggleCamera() {
   if (!openCvReady) return;
   const btn = document.getElementById('camToggleBtn');
   if (camStream) { stopCamera(); btn.textContent = 'Увімкнути камеру'; return; }
-  const status = document.getElementById('camStatus');
   log('Запит доступу до камери...');
   try {
     camStream = await navigator.mediaDevices.getUserMedia({
@@ -1121,12 +984,10 @@ async function toggleCamera() {
     video.srcObject = camStream;
     await new Promise((resolve) => { if (video.readyState >= 1) { resolve(); return; } video.onloadedmetadata = () => resolve(); });
     await video.play();
-    log(`Відео грає. ${video.videoWidth}x${video.videoHeight}`);
     document.getElementById('camPlaceholder').style.display = 'none';
     document.getElementById('camLive').classList.add('active');
     const wrapEl = document.getElementById('camWrap');
     drawGuide(wrapEl.clientWidth || video.videoWidth || 320, wrapEl.clientHeight || video.videoHeight || 320);
-    status.textContent = 'Камера увімкнена — шукаю якорі...';
     btn.textContent = 'Вимкнути камеру';
     document.getElementById('rescanBtn').style.display = 'none';
     document.getElementById('camResultsBox').innerHTML = '';
@@ -1136,7 +997,6 @@ async function toggleCamera() {
     scanTimer = setInterval(scanFrame, 200);
   } catch (e) {
     log(`ПОМИЛКА камери: ${e.message}`);
-    status.textContent = `Помилка камери: ${e.message}`;
   }
 }
 function stopCamera() {
@@ -1199,7 +1059,6 @@ function escapeHtml(s) {
   return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-let frameCounter = 0;
 function scanFrame() {
   if (locked) return;
   const video = document.getElementById('camVideo');
@@ -1207,87 +1066,47 @@ function scanFrame() {
   if (!camStream || video.readyState < 2) return;
 
   const loSize = wrap.clientWidth || 320;
-  const vw = video.videoWidth, vh = video.videoHeight;
-  // hi-res буфер — той самий кадр відео, але з більшою фізичною
-  // роздільністю, ніж дисплей: більше пікселів на біт при семплюванні
-  // (пошук маяків лишається на дешевому loSize-буфері — там роздільність
-  // не критична, важлива лише швидкість).
-  const hiSize = vw && vh ? Math.min(Math.min(vw, vh), 640) : loSize;
-
+  const hiSize = Math.min(Math.min(video.videoWidth, video.videoHeight), 640);
   const hiCanvas = document.createElement('canvas');
   hiCanvas.width = hiSize; hiCanvas.height = hiSize;
   const hctx = hiCanvas.getContext('2d', { willReadFrequently: true });
-  if (vw && vh) {
-    const sSize = Math.min(vw, vh);
-    const sx = (vw - sSize) / 2, sy = (vh - sSize) / 2;
-    hctx.drawImage(video, sx, sy, sSize, sSize, 0, 0, hiSize, hiSize);
-  } else {
-    hctx.drawImage(video, 0, 0, hiSize, hiSize);
-  }
+  hctx.drawImage(video, (video.videoWidth-hiSize)/2, (video.videoHeight-hiSize)/2, hiSize, hiSize, 0, 0, hiSize, hiSize);
   const hiImgData = hctx.getImageData(0, 0, hiSize, hiSize);
-
   const loCanvas = document.createElement('canvas');
   loCanvas.width = loSize; loCanvas.height = loSize;
   const cctx = loCanvas.getContext('2d', { willReadFrequently: true });
   cctx.drawImage(hiCanvas, 0, 0, hiSize, hiSize, 0, 0, loSize, loSize);
   const imgData = cctx.getImageData(0, 0, loSize, loSize);
-
-  const size = loSize;
-  const det = detectAndDecode(imgData, size, size, hiImgData, hiSize, hiSize);
-  frameCounter++;
+  const det = detectAndDecode(imgData, loSize, loSize, hiImgData, hiSize, hiSize);
 
   if (!det.ok) {
     recentCentroids = []; recentTexts = [];
-    drawLiveOverlay(size, size, det, `Шукаю якорі... (${det.reason})`);
-    document.getElementById('camStatus').textContent = `Пошук: ${det.reason}`;
-    // Лог кожного 5-го кадру, щоб не заливати текстове поле, але лишати видимою динаміку.
-    if (frameCounter % 5 === 0) log(`Кадр ${frameCounter}: ${det.reason}`);
+    drawLiveOverlay(loSize, loSize, det, `Шукаю якорі...`);
     return;
   }
   if (!det.startOk || det.agreement < MIN_AGREEMENT) {
     recentCentroids = []; recentTexts = [];
-    const reason = !det.startOk ? 'старт-символ не збігається (нестабільний кадр)' : `узгодженість чексуми ${(det.agreement*100).toFixed(0)}%`;
-    drawLiveOverlay(size, size, det, `Маяки знайдено (${det.mode}), ${reason}`);
-    document.getElementById('camStatus').textContent = `Кандидат — ${reason}, шукаю стабільніший кадр...`;
+    drawLiveOverlay(loSize, loSize, det, `Маяки знайдено...`);
     return;
   }
 
-  let votedText;
-  try {
-    votedText = decodeSectionsToText(det.sections);
-  } catch (e) {
-    votedText = '';
-  }
+  const votedText = decodeSectionsToText(det.sections);
   const centroid = centroidOf(det.pts);
   const stable = checkStability(centroid, votedText);
 
-  drawLiveOverlay(size, size, det, stable ? 'Стабільно, декодую...' : `Стабілізація... (${recentCentroids.length}/${CONFIRM_STREAK}) [${det.mode}]`);
-  document.getElementById('camStatus').textContent = stable
-    ? 'Впевнено знайдено — декодую.'
-    : `Кандидат (чексума ${(det.agreement*100).toFixed(0)}%, ${det.mode}) — стабілізація ${recentCentroids.length}/${CONFIRM_STREAK}`;
-
+  drawLiveOverlay(loSize, loSize, det, stable ? 'Стабільно...' : `Стабілізація...`);
   if (stable) {
     locked = true;
-    log(`Зафіксовано: режим=${det.mode}, чексума=${(det.agreement*100).toFixed(1)}%, текст="${votedText}".`);
-    finishDecode(size, size, det, votedText);
+    finishDecode(loSize, loSize, det, votedText);
   }
 }
 
 function finishDecode(W, H, det, votedText) {
-  try {
-    drawDecodedOverlay(W, H, det);
-    let html = '';
-    html += `<div style="margin-bottom:8px;color:rgba(255,255,255,0.6)">Режим: ${det.mode} · Чексума: ${(det.agreement*100).toFixed(1)}% · старт-символ: OK</div>`;
-    html += `<div class="final-result"><div class="label">Розпізнаний текст</div>"${escapeHtml(votedText)}"</div>`;
-    document.getElementById('camResultsBox').innerHTML = html;
-    document.getElementById('camStatus').textContent = 'Декодовано. Синя зона і жовті маяки — що бачив алгоритм.';
-    document.getElementById('rescanBtn').style.display = 'block';
-    log(`Результат: текст="${votedText}". --- ЗАВЕРШЕНО ---`);
-  } catch (e) {
-    log(`ПОМИЛКА фіналізації: ${e.name}: ${e.message}`);
-    document.getElementById('camResultsBox').innerHTML = `<div style="color:#ff8a8a">Помилка: ${escapeHtml(e.message)}</div>`;
-    locked = false;
-  }
+  drawDecodedOverlay(W, H, det);
+  const upperText = votedText.toUpperCase();
+  document.getElementById('camResultsBox').innerHTML = `<div class="final-result">${escapeHtml(upperText)}</div>`;
+  document.getElementById('rescanBtn').style.display = 'block';
+  log(`Результат: ${upperText}`);
 }
 
 function rescan() {
@@ -1295,27 +1114,16 @@ function rescan() {
   resetStability();
   resetTracking();
   document.getElementById('camResultsBox').innerHTML = '';
-  document.getElementById('camStatus').textContent = 'Шукаю якорі...';
   document.getElementById('rescanBtn').style.display = 'none';
-  const oc = document.getElementById('overlayCanvas');
-  oc.getContext('2d').clearRect(0, 0, oc.width, oc.height);
-  log('--- Повторне сканування розпочато ---');
+  document.getElementById('overlayCanvas').getContext('2d').clearRect(0,0,500,500);
 }
 
 document.getElementById('camToggleBtn').addEventListener('click', toggleCamera);
 document.getElementById('rescanBtn').addEventListener('click', rescan);
-document.getElementById('copyLogBtn').addEventListener('click', () => {
-  const box = document.getElementById('logBox');
-  box.select();
-  navigator.clipboard.writeText(box.value).catch(() => { document.execCommand('copy'); });
-});
-document.getElementById('clearLogBtn').addEventListener('click', () => {
-  document.getElementById('logBox').value = '';
-  log('Лог очищено.');
-});
+document.getElementById('copyLogBtn').addEventListener('click', () => { navigator.clipboard.writeText(document.getElementById('logBox').value); });
+document.getElementById('clearLogBtn').addEventListener('click', () => { document.getElementById('logBox').value = ''; });
 
 refresh();
-log(`Ініціалізація завершена. 5 орбіт, маяки на рівні ${FINDER_LEVEL} (r=${FINDER_R}), місткість ${MAX_MESSAGE_LEN} симв. Детекція маяків — OpenCV (вкладені контури), захоплення/тримання — осьова геометрія.`);
 </script>
 
 </body>
