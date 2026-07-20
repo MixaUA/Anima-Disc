@@ -970,12 +970,9 @@ let camStream = null;
 let scanTimer = null;
 let locked = false;
 
-/* Статичний приціл: пунктирне коло "тримайте диск у межах цього кола" +
-   внутрішнє коло приблизно там, де мають бути маяки, + хрестик по центру.
+/* Статичний приціл: коло "тримайте диск у межах цього кола", + хрестик по центру.
    Малюється ОДИН РАЗ при старті камери (і при зміні розміру вікна) на
-   окремому шарі під overlayCanvas — на відміну від зеленого/жовтого
-   оверлею детекції, який очищується й перемальовується щокадру і тому
-   тремтить/зникає, приціл лишається нерухомим орієнтиром завжди. */
+   окремому шарі під overlayCanvas — приціл лишається нерухомим орієнтиром завжди. */
 function drawGuide(W, H) {
   const gc = document.getElementById('guideCanvas');
   gc.width = W; gc.height = H;
@@ -983,22 +980,17 @@ function drawGuide(W, H) {
   g.clearRect(0, 0, W, H);
   const cx = W / 2, cy = H / 2;
   const outerR = Math.min(W, H) * 0.42;
-  // 225 ≈ фактичний зовнішній радіус диска в локальних одиницях малювання
-  // (LEVEL_RADII[4] + запас), FINDER_R — радіус кільця маяків: їхнє
-  // співвідношення дає, на якій частці зовнішнього кола приблизно
-  // опиняться маяки, коли диск заповнює приціл.
+  // Радіус прицілу залишається попереднім (beaconR)
   const beaconR = outerR * (FINDER_R / 225);
 
   g.save();
-  g.setLineDash([6, 6]);
-  g.lineWidth = 2;
-  g.strokeStyle = 'rgba(255,255,255,0.55)';
-  g.beginPath(); g.arc(cx, cy, outerR, 0, Math.PI * 2); g.stroke();
-
-  g.strokeStyle = 'rgba(255,210,90,0.55)';
+  // Біле суцільне коло, більш виражене
+  g.lineWidth = 3;
+  g.strokeStyle = '#ffffff';
   g.beginPath(); g.arc(cx, cy, beaconR, 0, Math.PI * 2); g.stroke();
   g.restore();
 
+  // Хрестик по центру
   g.strokeStyle = 'rgba(255,255,255,0.65)';
   g.lineWidth = 1.5;
   g.beginPath();
@@ -1006,17 +998,10 @@ function drawGuide(W, H) {
   g.moveTo(cx, cy - 11); g.lineTo(cx, cy + 11);
   g.stroke();
 
-  g.fillStyle = 'rgba(255,210,90,0.8)';
-  [0, 90, 180, 270].forEach(deg => {
-    const rad = deg * Math.PI / 180;
-    const tx = cx + Math.cos(rad) * beaconR, ty = cy + Math.sin(rad) * beaconR;
-    g.beginPath(); g.arc(tx, ty, 3, 0, Math.PI * 2); g.fill();
-  });
-
   g.font = '11px monospace';
   g.textAlign = 'center';
   g.fillStyle = 'rgba(255,255,255,0.6)';
-  const labelY = (cy + outerR + 16 < H - 4) ? cy + outerR + 16 : cy - outerR - 8;
+  const labelY = (cy + beaconR + 16 < H - 4) ? cy + beaconR + 16 : cy - beaconR - 8;
   g.fillText('тримайте диск у межах кола', cx, labelY);
 }
 function clearGuide() {
