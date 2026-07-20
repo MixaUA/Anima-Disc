@@ -814,18 +814,61 @@ function checksumAgreement(sections) {
 /* ================================================================
    ГОЛОВНИЙ ЦИКЛ ДЕТЕКЦІЇ: тримання → холодний старт як fallback
    ================================================================ */
+function sampleAllLevelsMat(imgData, W, H, pts) {
+  let src, gray, warped, thresh, trans;
+  const srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
+    pts[0].x, pts[0].y, pts[1].x, pts[1].y,
+    pts[2].x, pts[2].y, pts[3].x, pts[3].y
+  ]);
+  const dstPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
+    CENTER.x, CENTER.y - FINDER_R,
+    CENTER.x + FINDER_R, CENTER.y,
+    CENTER.x, CENTER.y + FINDER_R,
+    CENTER.x - FINDER_R, CENTER.y
+  ]);
+  const physicalSections = [];
+  for (let sec = 0; sec < SECTIONS; sec++) physicalSections.push(LEVELS.map(lvl => new Array(lvl.activeCount).fill(0)));
+  try {
+    src = cv.matFromImageData(imgData);
+    gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    trans = cv.getPerspectiveTransform(srcPts, dstPts);
+    warped = new cv.Mat();
+    cv.warpPerspective(gray, warped, trans, new cv.Size(DIAGRAM, DIAGRAM));
+    thresh = new cv.Mat();
+    cv.adaptiveThreshold(warped, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 21, 5);
+    LEVELS.forEach((lvl, li) => {
+      for (let sec = 0; sec < SECTIONS; sec++) {
+        lvl.activeLocalSlots.forEach((slot, k) => {
+          const globalSlot = sec * lvl.rawCount + slot;
+          const angle = (globalSlot + 0.5) * lvl.angleStepRad;
+          const lx = CENTER.x + Math.cos(angle) * lvl.radius;
+          const ly = CENTER.y + Math.sin(angle) * lvl.radius;
+          const px = Math.round(lx);
+          const py = Math.round(ly);
+          if (px >= 0 && px < DIAGRAM && py >= 0 && py < DIAGRAM) {
+            physicalSections[sec][li][k] = thresh.ucharPtr(py, px)[0] > 128 ? 1 : 0;
+          }
+        });
+      }
+    });
+  } finally {
+    if (src) src.delete(); if (gray) gray.delete(); if (warped) warped.delete();
+    if (thresh) thresh.delete(); if (trans) trans.delete();
+    srcPts.delete(); dstPts.delete();
+  }
+  return { physicalSections };
+}
+
 function detectAndDecode(imgData, W, H, hiImgData, hiW, hiH) {
   if (!openCvReady) return { ok: false, reason: 'OpenCV ще завантажується...', mode: 'loading' };
-
   const candidates = detectBullseyeCandidates(imgData, W, H);
   let pts, scalePx, mode;
-
   if (smoothedAxis) {
     const predicted = axisToCyclicPoints(smoothedAxis.p0, smoothedAxis.p2);
     const tr = trackedFromCandidates(candidates, predicted, smoothedAxis.scalePx);
     if (tr.ok) { pts = tr.points; scalePx = smoothedAxis.scalePx; mode = 'tracked'; }
   }
-
   if (!pts) {
     const cs = coldStartFromCandidates(candidates);
     if (!cs.ok) {
@@ -834,29 +877,11 @@ function detectAndDecode(imgData, W, H, hiImgData, hiW, hiH) {
     }
     pts = cs.points; scalePx = cs.scalePx; mode = 'cold';
   }
-
-  // Пошук маяків завжди йде на дешевому маленькому кадрі (швидкість).
-  // Але сáме читання бітів — де найбільше страждає точність — можна
-  // робити на значно більшому кадрі з тієї ж миті відео: більше фізичних
-  // пікселів на слот означає менше шуму семплювання незалежно від того,
-  // наскільки точна сама гомографія. Точки маяків масштабуються лінійно
-  // в координати hi-res кадру (той самий момент відео, просто інший
-  // розмір буфера) — homography рахується вже у hi-res просторі.
-  const useHiRes = hiImgData && hiW && hiH;
-  const sampleImg = useHiRes ? hiImgData : imgData;
-  const sampleW = useHiRes ? hiW : W;
-  const sampleH = useHiRes ? hiH : H;
-  const scale = useHiRes ? (hiW / W) : 1;
-  const samplePts = useHiRes ? pts.map(p => ({ x: p.x * scale, y: p.y * scale })) : pts;
-
-  const transform = solveHomography(LOCAL_ANCHORS, samplePts);
-  const { physicalSections } = sampleAllLevels(sampleImg, sampleW, sampleH, transform);
+  const { physicalSections } = sampleAllLevelsMat(imgData, W, H, pts);
   const { sections, startOk } = reassembleWithRotation(physicalSections);
   const agreement = checksumAgreement(sections);
-
   updateAxisState(pts, scalePx);
-
-  return { ok: true, mode, pts, scalePx, transform, sections, startOk, agreement, candidateCount: candidates.length };
+  return { ok: true, mode, pts, scalePx, sections, startOk, agreement, candidateCount: candidates.length };
 }
 
 /* ================================================================
