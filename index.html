@@ -846,12 +846,9 @@ function detectAndDecode(imgData, W, H, Q, geo) {
     perCopy.push(bits);
   }
 
-  // Додатковий захист: похибка кута зростає з радіусом (у великих
-  // секторах для довгих фраз далекі клітинки зсуваються сильніше), тому
-  // одного збігу преамбули+чексуми в ОСНОВНІЙ гіпотезі замало — вимагаємо,
-  // щоб чексума самостійно збігалась ще й у копіях (кожна з 4 копій несе
-  // той самий текст незалежно).
-  let copiesValid = 0;
+  const votedBits = new Array(geo.capacity);
+  let agreeSum = 0;
+  let copiesValid = 0; // лише для діагностики в лозі, на прийняття більше не впливає
   for (const bits of perCopy) {
     const preDist = hamming(bits.slice(0, PREAMBLE.length), PREAMBLE);
     const checksum = bits.slice(PREAMBLE.length, PREAMBLE.length + CHECKSUM_BITS);
@@ -859,13 +856,6 @@ function detectAndDecode(imgData, W, H, Q, geo) {
     const csDist = hamming(computeChecksum(dataBits), checksum);
     if (preDist === 0 && csDist === 0) copiesValid++;
   }
-  if (copiesValid < 4) {
-    trackingMiss();
-    return { ok: false, reason: `кандидат не пройшов точну перевірку по копіях (валідних ${copiesValid}/4) — ймовірно неточний кут`, bullseye: { cx, cy } };
-  }
-
-  const votedBits = new Array(geo.capacity);
-  let agreeSum = 0;
   for (let i = 0; i < geo.capacity; i++) {
     let ones = 0; for (let kk = 0; kk < 4; kk++) ones += perCopy[kk][i];
     votedBits[i] = ones >= 2 ? 1 : 0;
@@ -873,7 +863,27 @@ function detectAndDecode(imgData, W, H, Q, geo) {
   }
   const agreement = agreeSum / (geo.capacity * 4);
 
-  log(`Око (OpenCV): масштаб=${v.scale.toFixed(2)}px/од., нахил k=${v.k.toFixed(2)}, кандидатів преамбули=${coarseHits.length}, θ=${accepted.theta.toFixed(2)}°, дзеркало=${accepted.flip}, копій валідно=${copiesValid}/4, узгодженість=${(agreement*100).toFixed(1)}%.`);
+  // Реальний гейт прийняття — на ВИГОЛОСОВАНИХ бітах (голосування вже
+  // компенсує одиничний шум в одній з 4 копій; вимагати ідеальності від
+  // КОЖНОЇ копії окремо, як було раніше, зводить нанівець сенс
+  // голосування). Точний збіг преамбули+чексуми саме на виголосованому
+  // результаті — і досі дуже сильний захист від хибного прийняття
+  // (24 біти одночасно), просто застосований у правильному місці.
+  const votedPreDist = hamming(votedBits.slice(0, PREAMBLE.length), PREAMBLE);
+  const votedChecksumBits = votedBits.slice(PREAMBLE.length, PREAMBLE.length + CHECKSUM_BITS);
+  const votedDataBitsForCheck = votedBits.slice(PREAMBLE.length + CHECKSUM_BITS);
+  const votedCsDist = hamming(computeChecksum(votedDataBitsForCheck), votedChecksumBits);
+
+  if (votedPreDist > 0 || votedCsDist > 0 || agreement < MIN_AGREEMENT) {
+    trackingMiss();
+    return {
+      ok: false,
+      reason: `кандидат: узгодженість ${(agreement*100).toFixed(0)}%, преамбула(голос.) відхилення=${votedPreDist}, чексума(голос.) відхилення=${votedCsDist}, валідних копій=${copiesValid}/4 — чекаю стабільнішого кадру`,
+      bullseye: { cx, cy }
+    };
+  }
+
+  log(`Око (OpenCV): масштаб=${v.scale.toFixed(2)}px/од., нахил k=${v.k.toFixed(2)}, кандидатів преамбули=${coarseHits.length}, θ=${accepted.theta.toFixed(2)}°, дзеркало=${accepted.flip}, копій ідеальних=${copiesValid}/4, узгодженість=${(agreement*100).toFixed(1)}%.`);
 
   updateTrackedBounds(cx, cy, v.scale * geo.outerR, W, H);
 
