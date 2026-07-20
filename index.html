@@ -151,8 +151,23 @@ textarea { width: 100%; height: 180px; font-family: monospace; font-size: 11px; 
   </div>
 
   <div class="input-group">
-    <label for="logoInput">Лого в центр (необов'язково)</label>
-    <input type="file" id="logoInput" accept="image/*" />
+    <label for="logoInput">Лого в центр (PNG, JPEG)</label>
+    <div style="display: flex; gap: 8px;">
+      <input type="file" id="logoInput" accept="image/png, image/jpeg" style="flex: 1;" />
+      <button class="secondary" id="centerLogoBtn" style="padding: 4px 8px; font-size: 12px;">Центр</button>
+      <button class="secondary" id="clearLogoBtn" style="padding: 4px 8px; font-size: 12px;">Очистити</button>
+    </div>
+  </div>
+
+  <div class="input-group" style="display: flex; flex-direction: row; gap: 10px;">
+    <div style="flex: 1;">
+      <label for="bitsColor">Колір бітів</label>
+      <input type="color" id="bitsColor" value="#000000" style="height: 30px; width: 100%;" />
+    </div>
+    <div style="flex: 1;">
+      <label for="anchorsColor">Колір якорів</label>
+      <input type="color" id="anchorsColor" value="#000000" style="height: 30px; width: 100%;" />
+    </div>
   </div>
 
   <div class="error" id="errorBox"></div>
@@ -294,19 +309,19 @@ function decodeSectionsToText(sections) {
 /* ================================================================
    МАЛЮВАННЯ ЕНКОДЕРА
    ================================================================ */
+const bitsColor = document.getElementById('bitsColor');
+const anchorsColor = document.getElementById('anchorsColor');
+const centerLogoBtn = document.getElementById('centerLogoBtn');
+
 function drawFinder(ctx, cx, cy) {
-  // Кільце + світлий проміжок + суцільна центральна крапка ("бичаче око").
-  // Ця структура (3 вкладені контури) — саме те, що детектор шукає через
-  // ієрархію контурів OpenCV (findContours RETR_TREE): зовнішня межа
-  // кільця → межа проміжку (діра) → межа крапки, вкладені один в одного.
   ctx.fillStyle = DISC_BG;
   ctx.beginPath(); ctx.arc(cx, cy, FINDER_OUTER_RADIUS, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = '#000000';
+  ctx.strokeStyle = anchorsColor.value;
   ctx.lineWidth = FINDER_RING_WIDTH;
   ctx.beginPath();
   ctx.arc(cx, cy, FINDER_OUTER_RADIUS - FINDER_RING_WIDTH / 2, 0, Math.PI * 2);
   ctx.stroke();
-  ctx.fillStyle = '#000000';
+  ctx.fillStyle = anchorsColor.value;
   ctx.beginPath(); ctx.arc(cx, cy, FINDER_DOT_RADIUS, 0, Math.PI * 2); ctx.fill();
 }
 
@@ -329,7 +344,7 @@ function drawDataRing(ctx, lvl, full) {
         ctx.beginPath();
         ctx.arc(CENTER.x, CENTER.y, lvl.radius, 0, Math.PI * 2, false);
         ctx.lineWidth = TICK_WIDTH;
-        ctx.strokeStyle = '#000000';
+        ctx.strokeStyle = bitsColor.value;
         ctx.stroke();
         continue;
       }
@@ -342,11 +357,20 @@ function drawDataRing(ctx, lvl, full) {
       ctx.arc(CENTER.x, CENTER.y, lvl.radius, startAngle, endAngle, false);
       ctx.lineWidth = TICK_WIDTH;
       ctx.lineCap = 'round';
-      ctx.strokeStyle = '#000000';
+      ctx.strokeStyle = bitsColor.value;
       ctx.stroke();
     }
   }
 }
+
+// ... в кінці script ...
+centerLogoBtn.addEventListener('click', () => {
+  logoX = CENTER.x; logoY = CENTER.y;
+  refresh();
+});
+bitsColor.addEventListener('input', refresh);
+anchorsColor.addEventListener('input', refresh);
+
 
 function sectionBitsToPhysicalLevels(sectionBitsFlat) {
   const levelBits = sectionBitsToLevels(sectionBitsFlat);
@@ -391,13 +415,13 @@ function render(ctx, sections, logoImg) {
   if (logoImg) {
     const scale = Math.max((LOGO_R * 2) / logoImg.width, (LOGO_R * 2) / logoImg.height);
     const w = logoImg.width * scale, h = logoImg.height * scale;
-    ctx.drawImage(logoImg, CENTER.x - w / 2, CENTER.y - h / 2, w, h);
+    ctx.drawImage(logoImg, logoX - w / 2, logoY - h / 2, w, h);
   } else {
     ctx.fillStyle = DISC_BG;
     ctx.fillRect(CENTER.x - LOGO_R, CENTER.y - LOGO_R, LOGO_R * 2, LOGO_R * 2);
   }
   ctx.restore();
-}
+  }
 
 /* ================================================================
    ЛОГ
@@ -422,6 +446,8 @@ const logoInput = document.getElementById('logoInput');
 const downloadBtn = document.getElementById('downloadBtn');
 let currentLogoImg = null;
 let currentSections = null;
+let logoX = CENTER.x, logoY = CENTER.y;
+let isDragging = false;
 
 function refresh() {
   const text = msgInput.value.toUpperCase();
@@ -444,19 +470,75 @@ logoInput.addEventListener('change', () => {
   const file = logoInput.files[0];
   if (!file) { currentLogoImg = null; refresh(); return; }
   const img = new Image();
-  img.onload = () => { currentLogoImg = img; refresh(); };
+  img.onload = () => { 
+    currentLogoImg = img; 
+    logoX = CENTER.x; logoY = CENTER.y;
+    refresh(); 
+  };
   img.src = URL.createObjectURL(file);
 });
-downloadBtn.addEventListener('click', () => {
-  const link = document.createElement('a');
-  link.download = 'round-code.png';
-  link.href = canvas.toDataURL('image/png');
-  link.click();
+clearLogoBtn.addEventListener('click', () => {
+  currentLogoImg = null;
+  logoInput.value = '';
+  refresh();
+  log('Логотип очищено.');
 });
 
-/* ================================================================
-   ГОМОГРАФІЯ (DLT)
-   ================================================================ */
+canvas.addEventListener('mousedown', (e) => {
+  if (!currentLogoImg) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+  if (Math.hypot(x - CENTER.x, y - CENTER.y) < LOGO_R) {
+    isDragging = true;
+  }
+});
+canvas.addEventListener('mousemove', (e) => {
+  if (!isDragging) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+  
+  const dist = Math.hypot(x - CENTER.x, y - CENTER.y);
+  if (dist < LOGO_R) {
+    logoX = x; logoY = y;
+  } else {
+    const angle = Math.atan2(y - CENTER.y, x - CENTER.x);
+    logoX = CENTER.x + Math.cos(angle) * LOGO_R;
+    logoY = CENTER.y + Math.sin(angle) * LOGO_R;
+  }
+  render(ctx, currentSections, currentLogoImg);
+});
+canvas.addEventListener('mouseup', () => { isDragging = false; });
+canvas.addEventListener('mouseleave', () => { isDragging = false; });
+
+canvas.addEventListener('mousedown', (e) => {
+  if (!currentLogoImg) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+  if (Math.hypot(x - CENTER.x, y - CENTER.y) < LOGO_R) {
+    isDragging = true;
+  }
+});
+canvas.addEventListener('mousemove', (e) => {
+  if (!isDragging) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+  
+  const dist = Math.hypot(x - CENTER.x, y - CENTER.y);
+  if (dist < LOGO_R) {
+    logoX = x; logoY = y;
+  } else {
+    const angle = Math.atan2(y - CENTER.y, x - CENTER.x);
+    logoX = CENTER.x + Math.cos(angle) * LOGO_R;
+    logoY = CENTER.y + Math.sin(angle) * LOGO_R;
+  }
+  render(ctx, currentSections, currentLogoImg);
+});
+canvas.addEventListener('mouseup', () => { isDragging = false; });
+canvas.addEventListener('mouseleave', () => { isDragging = false; });
 function solveLinearSystem(A, b) {
   const n = b.length;
   const M = A.map(row => row.slice());
