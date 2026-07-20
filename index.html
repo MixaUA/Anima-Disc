@@ -191,18 +191,18 @@ textarea { width: 100%; height: 180px; font-family: monospace; font-size: 11px; 
 
 <script>
 /* ================================================================
-   ГЕОМЕТРІЯ ДИСКА — 5 орбіт, маяки на середній (індекс 2)
+   ГЕОМЕТРІЯ ДИСКА — 3 орбіти, маяки на середній (індекс 1)
    ================================================================ */
 const DIAGRAM = 500;
 const CENTER = { x: DIAGRAM / 2, y: DIAGRAM / 2 };
-const LOGO_R = 78;
-const LEVEL_RADII = [100, 128, 156, 184, 212];
-const FINDER_LEVEL = 2;
+const LOGO_R = 128; // Розширено до радіуса попередньої середньої орбіти
+const LEVEL_RADII = [156, 184, 212];
+const FINDER_LEVEL = 1; // Середня орбіта (індекс 1 з 3)
 const FINDER_R = LEVEL_RADII[FINDER_LEVEL];
 const TICK_WIDTH = 7;
 const SECTIONS = 4;
 const QUADRANT_CENTER_DEG = [0, 90, 180, 270];
-const ACTIVE_PER_LEVEL = [12, 12, 12, 18, 24];
+const ACTIVE_PER_LEVEL = [12, 18, 24]; // Оновлено для 3 рівнів
 const RESERVED_EACH_SIDE = 2;
 
 const FINDER_OUTER_RADIUS = 13;
@@ -814,8 +814,14 @@ function checksumAgreement(sections) {
 /* ================================================================
    ГОЛОВНИЙ ЦИКЛ ДЕТЕКЦІЇ: тримання → холодний старт як fallback
    ================================================================ */
+// Додано: змінні для вимірювання продуктивності
+let lastFrameTime = performance.now();
+let fps = 0;
+let lastLogFrame = 0;
+
 function sampleAllLevelsMat(imgData, W, H, pts) {
   let src, gray, warped, thresh, trans;
+  const t0 = performance.now();
   const srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
     pts[0].x, pts[0].y, pts[1].x, pts[1].y,
     pts[2].x, pts[2].y, pts[3].x, pts[3].y
@@ -852,6 +858,11 @@ function sampleAllLevelsMat(imgData, W, H, pts) {
         });
       }
     });
+    const t1 = performance.now();
+    // Логування тільки кожні 20 кадрів для економії місця
+    if (frameCounter % 20 === 0) {
+      log(`Read: ${(t1 - t0).toFixed(1)}ms | FPS: ${fps.toFixed(0)}`);
+    }
   } finally {
     if (src) src.delete(); if (gray) gray.delete(); if (warped) warped.delete();
     if (thresh) thresh.delete(); if (trans) trans.delete();
@@ -859,6 +870,19 @@ function sampleAllLevelsMat(imgData, W, H, pts) {
   }
   return { physicalSections };
 }
+
+// Функція для оновлення FPS
+function updateFPS() {
+  const now = performance.now();
+  fps = 1000 / (now - lastFrameTime);
+  lastFrameTime = now;
+  // Оновлення UI
+  const status = document.getElementById('camStatus');
+  if (status) {
+    status.setAttribute('data-fps', fps.toFixed(0));
+  }
+}
+// У scanFrame додати виклик updateFPS() на початку.
 
 function detectAndDecode(imgData, W, H, hiImgData, hiW, hiH) {
   if (!openCvReady) return { ok: false, reason: 'OpenCV ще завантажується...', mode: 'loading' };
