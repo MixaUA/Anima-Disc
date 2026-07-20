@@ -970,37 +970,47 @@ let camStream = null;
 let scanTimer = null;
 let locked = false;
 
-/* Статичний приціл: коло "тримайте диск у межах цього кола", + хрестик по центру.
-   Малюється ОДИН РАЗ при старті камери (і при зміні розміру вікна) на
-   окремому шарі під overlayCanvas — приціл лишається нерухомим орієнтиром завжди. */
+/* Статичний приціл: коло "тримайте диск у межах цього кола" (пунктирне, тонке), + хрестик по центру.
+   Навколо кола — затемнення (маска).
+   Малюється ОДИН РАЗ при старті камери. */
 function drawGuide(W, H) {
   const gc = document.getElementById('guideCanvas');
   gc.width = W; gc.height = H;
   const g = gc.getContext('2d');
   g.clearRect(0, 0, W, H);
   const cx = W / 2, cy = H / 2;
-  const outerR = Math.min(W, H) * 0.42;
-  // Радіус прицілу залишається попереднім (beaconR)
-  const beaconR = outerR * (FINDER_R / 225);
+  const beaconR = Math.min(W, H) * 0.42 * (FINDER_R / 225);
 
+  // 1. Малюємо затемнення
+  g.fillStyle = 'rgba(0,0,0,0.6)';
+  g.fillRect(0, 0, W, H);
+
+  // 2. Вирізаємо коло
+  g.globalCompositeOperation = 'destination-out';
+  g.fillStyle = '#000';
+  g.beginPath(); g.arc(cx, cy, beaconR, 0, Math.PI * 2); g.fill();
+  g.globalCompositeOperation = 'source-over';
+
+  // 3. Малюємо рамку та хрестик поверх маски
   g.save();
-  // Біле суцільне коло, більш виражене
-  g.lineWidth = 3;
+  // Тонке біле пунктирне коло
+  g.setLineDash([4, 4]);
+  g.lineWidth = 1.5;
   g.strokeStyle = '#ffffff';
   g.beginPath(); g.arc(cx, cy, beaconR, 0, Math.PI * 2); g.stroke();
   g.restore();
 
   // Хрестик по центру
-  g.strokeStyle = 'rgba(255,255,255,0.65)';
-  g.lineWidth = 1.5;
+  g.strokeStyle = 'rgba(255,255,255,0.4)';
+  g.lineWidth = 1;
   g.beginPath();
-  g.moveTo(cx - 11, cy); g.lineTo(cx + 11, cy);
-  g.moveTo(cx, cy - 11); g.lineTo(cx, cy + 11);
+  g.moveTo(cx - 8, cy); g.lineTo(cx + 8, cy);
+  g.moveTo(cx, cy - 8); g.lineTo(cx, cy + 8);
   g.stroke();
 
   g.font = '11px monospace';
   g.textAlign = 'center';
-  g.fillStyle = 'rgba(255,255,255,0.6)';
+  g.fillStyle = 'rgba(255,255,255,0.5)';
   const labelY = (cy + beaconR + 16 < H - 4) ? cy + beaconR + 16 : cy - beaconR - 8;
   g.fillText('тримайте диск у межах кола', cx, labelY);
 }
