@@ -602,49 +602,6 @@ canvas.addEventListener('mousemove', (e) => {
 canvas.addEventListener('mouseup', () => { isDragging = false; });
 canvas.addEventListener('mouseleave', () => { isDragging = false; });
 
-function solveLinearSystem(A, b) {
-  const n = b.length;
-  const M = A.map(row => row.slice());
-  const B = b.slice();
-  for (let col = 0; col < n; col++) {
-    let maxRow = col;
-    for (let r = col + 1; r < n; r++) if (Math.abs(M[r][col]) > Math.abs(M[maxRow][col])) maxRow = r;
-    [M[col], M[maxRow]] = [M[maxRow], M[col]];
-    [B[col], B[maxRow]] = [B[maxRow], B[col]];
-    const pivot = M[col][col];
-    for (let r = 0; r < n; r++) {
-      if (r === col || pivot === 0) continue;
-      const factor = M[r][col] / pivot;
-      for (let c = col; c < n; c++) M[r][c] -= factor * M[col][c];
-      B[r] -= factor * B[col];
-    }
-  }
-  return M.map((row, i) => row[i] !== 0 ? B[i] / row[i] : 0);
-}
-function solveHomography(src, dst) {
-  const A = [], b = [];
-  for (let i = 0; i < 4; i++) {
-    const { x, y } = src[i];
-    const { x: xp, y: yp } = dst[i];
-    A.push([x, y, 1, 0, 0, 0, -x * xp, -y * xp]); b.push(xp);
-    A.push([0, 0, 0, x, y, 1, -x * yp, -y * yp]); b.push(yp);
-  }
-  const h = solveLinearSystem(A, b);
-  return { h11: h[0], h12: h[1], h13: h[2], h21: h[3], h22: h[4], h23: h[5], h31: h[6], h32: h[7] };
-}
-function applyHomography(H, x, y) {
-  const w = H.h31 * x + H.h32 * y + 1;
-  return { x: (H.h11 * x + H.h12 * y + H.h13) / w, y: (H.h21 * x + H.h22 * y + H.h23) / w };
-}
-
-function getLocalAnchors() {
-  return QUADRANT_CENTER_DEG.map(deg => {
-    const rad = deg * Math.PI / 180;
-    return { x: Math.cos(rad) * FINDER_R, y: Math.sin(rad) * FINDER_R };
-  });
-}
-const LOCAL_ANCHORS = getLocalAnchors();
-
 function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
 let openCvReady = false;
@@ -815,59 +772,55 @@ function trackedFromCandidates(candidates, predictedPts, scalePx) {
   return { ok: true, points: found };
 }
 
-function sampleAllLevels(imgData, W, H, transform) {
-  const data = imgData.data;
-  function lumAt(x, y) {
-    x = Math.round(x); y = Math.round(y);
-    if (x < 0 || x >= W || y < 0 || y >= H) return 255;
-    const i = (y * W + x) * 4;
-    return data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
-  }
-
-  const points = [];
-  LEVELS.forEach((lvl, li) => {
-    const dr = TICK_WIDTH * 0.3;
-    const da = lvl.angleStepRad * 0.15;
-    for (let sec = 0; sec < SECTIONS; sec++) {
-      lvl.activeLocalSlots.forEach((slot, k) => {
-        const globalSlot = sec * lvl.rawCount + slot;
-        const angle = (globalSlot + 0.5) * lvl.angleStepRad;
-        const subOffsets = [
-          { rr: 0, aa: 0 }, { rr: dr, aa: 0 }, { rr: -dr, aa: 0 },
-          { rr: 0, aa: da }, { rr: 0, aa: -da }
-        ];
-        const subs = subOffsets.map(o => {
-          const r = lvl.radius + o.rr, a = angle + o.aa;
-          return { lx: Math.cos(a) * r, ly: Math.sin(a) * r };
-        });
-        points.push({ section: sec, levelIdx: li, localIdx: k, subs });
-      });
-    }
-  });
-
-  const levelLums = LEVELS.map(() => ({ min: 255, max: 0 }));
-  const slotLums = points.map(pt => {
-    let sum = 0;
-    for (const s of pt.subs) {
-      const p = applyHomography(transform, s.lx, s.ly);
-      sum += lumAt(p.x, p.y);
-    }
-    const avg = sum / pt.subs.length;
-    const lv = levelLums[pt.levelIdx];
-    if (avg < lv.min) lv.min = avg;
-    if (avg > lv.max) lv.max = avg;
-    return avg;
-  });
-  const levelThresholds = levelLums.map(lv => (lv.min + lv.max) / 2);
-
+/* ================================================================
+   ЧИТАННЯ БІТІВ — cv.warpPerspective + cv.adaptiveThreshold
+   (порт із перевіреного референсу; локально-адаптивний поріг замість
+   глобального мін/макс по рівню, тому стійкий до нерівного освітлення)
+   ================================================================ */
+function sampleAllLevelsMat(imgData, pts) {
+  let src, gray, warped, thresh, trans;
+  const srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
+    pts[0].x, pts[0].y, pts[1].x, pts[1].y,
+    pts[2].x, pts[2].y, pts[3].x, pts[3].y
+  ]);
+  const dstPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
+    CENTER.x, CENTER.y - FINDER_R,
+    CENTER.x + FINDER_R, CENTER.y,
+    CENTER.x, CENTER.y + FINDER_R,
+    CENTER.x - FINDER_R, CENTER.y
+  ]);
   const physicalSections = [];
   for (let sec = 0; sec < SECTIONS; sec++) physicalSections.push(LEVELS.map(lvl => new Array(lvl.activeCount).fill(0)));
-
-  points.forEach((pt, i) => {
-    physicalSections[pt.section][pt.levelIdx][pt.localIdx] = slotLums[i] < levelThresholds[pt.levelIdx] ? 1 : 0;
-  });
-
-  return { physicalSections, levelThresholds };
+  try {
+    src = cv.matFromImageData(imgData);
+    gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    trans = cv.getPerspectiveTransform(srcPts, dstPts);
+    warped = new cv.Mat();
+    cv.warpPerspective(gray, warped, trans, new cv.Size(DIAGRAM, DIAGRAM));
+    thresh = new cv.Mat();
+    cv.adaptiveThreshold(warped, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 21, 5);
+    LEVELS.forEach((lvl, li) => {
+      for (let sec = 0; sec < SECTIONS; sec++) {
+        lvl.activeLocalSlots.forEach((slot, k) => {
+          const globalSlot = sec * lvl.rawCount + slot;
+          const angle = (globalSlot + 0.5) * lvl.angleStepRad;
+          const lx = CENTER.x + Math.cos(angle) * lvl.radius;
+          const ly = CENTER.y + Math.sin(angle) * lvl.radius;
+          const px = Math.round(lx);
+          const py = Math.round(ly);
+          if (px >= 0 && px < DIAGRAM && py >= 0 && py < DIAGRAM) {
+            physicalSections[sec][li][k] = thresh.ucharPtr(py, px)[0] > 128 ? 1 : 0;
+          }
+        });
+      }
+    });
+  } finally {
+    if (src) src.delete(); if (gray) gray.delete(); if (warped) warped.delete();
+    if (thresh) thresh.delete(); if (trans) trans.delete();
+    srcPts.delete(); dstPts.delete();
+  }
+  return { physicalSections };
 }
 
 function reassembleWithRotation(physicalSections) {
@@ -919,19 +872,16 @@ function detectAndDecode(imgData, W, H, hiImgData, hiW, hiH) {
 
   const useHiRes = hiImgData && hiW && hiH;
   const sampleImg = useHiRes ? hiImgData : imgData;
-  const sampleW = useHiRes ? hiW : W;
-  const sampleH = useHiRes ? hiH : H;
   const scale = useHiRes ? (hiW / W) : 1;
   const samplePts = useHiRes ? pts.map(p => ({ x: p.x * scale, y: p.y * scale })) : pts;
 
-  const transform = solveHomography(LOCAL_ANCHORS, samplePts);
-  const { physicalSections, levelThresholds } = sampleAllLevels(sampleImg, sampleW, sampleH, transform);
+  const { physicalSections } = sampleAllLevelsMat(sampleImg, samplePts);
   const { sections, startOk, lang } = reassembleWithRotation(physicalSections);
   const agreement = checksumAgreement(sections);
 
   updateAxisState(pts, scalePx);
 
-  return { ok: true, mode, pts, scalePx, transform, sections, startOk, agreement, lang };
+  return { ok: true, mode, pts, scalePx, sections, startOk, agreement, lang };
 }
 
 const AXIS_EMA_ALPHA = 0.35;
@@ -1159,10 +1109,6 @@ function scanFrame() {
     const reason = !det.startOk ? 'старт-символ не збігається' : `узгодженість чексуми ${(det.agreement*100).toFixed(0)}%`;
     drawLiveOverlay(size, size, det, `Маяки знайдено (${det.mode}), ${reason}`);
     document.getElementById('camStatus').textContent = `Кандидат — ${reason}, шукаю стабільніший кадр...`;
-    // Раніше ця гілка ("маяки зловлено, але декодування ще не пройшло")
-    // не потрапляла в лог узагалі — тільки в статус-текст над камерою,
-    // який зникає. Тепер видно і цю стадію, щоб можна було відрізнити
-    // "не можу зловити маяки" від "маяки зловив, декодування не збігається".
     if (frameCounter % 5 === 0) log(`Кадр ${frameCounter}: маяки зловлено (${det.mode}), ${reason}`);
     return;
   }
