@@ -439,9 +439,18 @@ const anchorsColor = document.getElementById('anchorsColor');
 const clearLogoBtn = document.getElementById('clearLogoBtn');
 const langToggleBtn = document.getElementById('langToggleBtn');
 
-function drawFinder(ctx, cx, cy) {
-  ctx.fillStyle = DISC_BG;
-  ctx.beginPath(); ctx.arc(cx, cy, FINDER_OUTER_RADIUS, 0, Math.PI * 2); ctx.fill();
+function drawFinder(ctx, cx, cy, transparentBg) {
+  if (transparentBg) {
+    // Замість заливки кольором диска — реально прозора "дірка" під кільцем
+    // маяка, незалежно від того, що намальовано під ним (дуга бітів).
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath(); ctx.arc(cx, cy, FINDER_OUTER_RADIUS, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  } else {
+    ctx.fillStyle = DISC_BG;
+    ctx.beginPath(); ctx.arc(cx, cy, FINDER_OUTER_RADIUS, 0, Math.PI * 2); ctx.fill();
+  }
   ctx.strokeStyle = anchorsColor.value;
   ctx.lineWidth = FINDER_RING_WIDTH;
   ctx.beginPath();
@@ -522,10 +531,13 @@ function computeFullByLevel(sections) {
   return fullByLevel;
 }
 
-function render(ctx, sections, logoImg, lang) {
+function render(ctx, sections, logoImg, lang, opts) {
+  const transparentBg = !!(opts && opts.transparentBg);
   ctx.clearRect(0, 0, DIAGRAM, DIAGRAM);
-  ctx.fillStyle = DISC_BG;
-  ctx.fillRect(0, 0, DIAGRAM, DIAGRAM);
+  if (!transparentBg) {
+    ctx.fillStyle = DISC_BG;
+    ctx.fillRect(0, 0, DIAGRAM, DIAGRAM);
+  }
 
   const fullByLevel = computeFullByLevel(sections);
 
@@ -540,7 +552,7 @@ function render(ctx, sections, logoImg, lang) {
     const rad = deg * Math.PI / 180;
     const fx = CENTER.x + Math.cos(rad) * FINDER_R;
     const fy = CENTER.y + Math.sin(rad) * FINDER_R;
-    drawFinder(ctx, fx, fy);
+    drawFinder(ctx, fx, fy, transparentBg);
   }
 
   ctx.save();
@@ -552,7 +564,7 @@ function render(ctx, sections, logoImg, lang) {
     const scale = coverScale * logoScale;
     const w = logoImg.width * scale, h = logoImg.height * scale;
     ctx.drawImage(logoImg, logoX - w / 2, logoY - h / 2, w, h);
-  } else {
+  } else if (!transparentBg) {
     ctx.fillStyle = DISC_BG;
     ctx.fillRect(CENTER.x - LOGO_R, CENTER.y - LOGO_R, LOGO_R * 2, LOGO_R * 2);
   }
@@ -644,8 +656,13 @@ const downloadBtn = document.getElementById('downloadBtn');
 const downloadSvgBtn = document.getElementById('downloadSvgBtn');
 downloadBtn.addEventListener('click', () => {
   if (!currentSections) return;
-  triggerDownload(canvas.toDataURL('image/png'), 'round-code.png');
-  log('PNG завантажено.');
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = DIAGRAM;
+  offCanvas.height = DIAGRAM;
+  const offCtx = offCanvas.getContext('2d');
+  render(offCtx, currentSections, currentLogoImg, currentLang, { transparentBg: true });
+  triggerDownload(offCanvas.toDataURL('image/png'), 'round-code.png');
+  log('PNG завантажено (прозорий фон, лого обрізане по колу).');
 });
 downloadSvgBtn.addEventListener('click', () => {
   if (!currentSections) return;
