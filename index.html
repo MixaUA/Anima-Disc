@@ -256,18 +256,27 @@ if (CYRILLIC_LETTERS.length !== LATIN_LETTERS.length) {
 const LETTER_SLOT_COUNT = CYRILLIC_LETTERS.length; // 33
 
 const DIGIT_CHARS = "0123456789".split('');
-// Спецсимволи: 7 початкових + 12 нових (рівно заповнюють кодбук до 64)
-const SPECIAL_CHARS = " .,@'+-".split('').concat(':;()%/*=#"_~'.split(''));
+// Спецсимволи: 7 початкових + 11 нових (не 12 — один слот віддано під
+// другий СТАРТ-символ нижче, щоб прапорець мови не потребував окремої
+// мітки на диску, а розпізнавався одночасно зі СТАРТ-символом).
+const SPECIAL_CHARS = " .,@'+-".split('').concat(':;()%/*=#"_'.split(''));
 
-const START_CHAR = '\u0001';
+// ДВА СТАРТ-символи замість одного: СТАРТ і так має бути надійно
+// знайдений decoder'ом, щоб визначити правильний поворот зчитаних 4
+// секцій (reassembleWithRotation перебирає 4 повороти й шукає СТАРТ на
+// позиції 0). Замість окремої ізольованої мітки на диску (яка додала
+// зайву видиму цятку і плутанину біля маяка), мова кодується просто
+// ЯКИЙ САМЕ зі СТАРТів знайдено — той самий факт розпізнавання, без
+// жодної додаткової геометрії чи окремого коду детекції.
+const START_UK_CHAR = '\u0001';
+const START_EN_CHAR = '\u0003';
 const PAD_CHAR = '\u0002';
 const BITS_PER_SYMBOL = 6;
 const CODEBOOK_MAX = 1 << BITS_PER_SYMBOL; // 64
 
 // Кодбук індексується так: [0..32]=букви (мовозалежний гліф), [33..42]=цифри,
-// [43..61]=спецсимволи, [62]=СТАРТ, [63]=PAD. Індекс символу НЕ залежить
-// від мови — залежить лише від того, ЯКИЙ гліф показати на цьому індексі.
-const NON_LETTER_CODEBOOK = DIGIT_CHARS.concat(SPECIAL_CHARS).concat([START_CHAR, PAD_CHAR]);
+// [43..60]=спецсимволи, [61]=СТАРТ-укр, [62]=СТАРТ-англ, [63]=PAD.
+const NON_LETTER_CODEBOOK = DIGIT_CHARS.concat(SPECIAL_CHARS).concat([START_UK_CHAR, START_EN_CHAR, PAD_CHAR]);
 const CODEBOOK_LENGTH = LETTER_SLOT_COUNT + NON_LETTER_CODEBOOK.length;
 if (CODEBOOK_LENGTH > CODEBOOK_MAX) {
   const msg = `КРИТИЧНО: кодбук (${CODEBOOK_LENGTH} символів) перевищує межу 6-бітного символу (${CODEBOOK_MAX}). ` +
@@ -275,45 +284,34 @@ if (CODEBOOK_LENGTH > CODEBOOK_MAX) {
   earlyLog ? earlyLog(msg) : console.error(msg);
   throw new Error(msg);
 }
-const START_IDX = LETTER_SLOT_COUNT + DIGIT_CHARS.length + SPECIAL_CHARS.length;
-const PAD_IDX = START_IDX + 1;
+const START_UK_IDX = LETTER_SLOT_COUNT + DIGIT_CHARS.length + SPECIAL_CHARS.length;
+const START_EN_IDX = START_UK_IDX + 1;
+const PAD_IDX = START_EN_IDX + 1;
 
 function glyphTable(lang) {
   return (lang === 'en' ? LATIN_LETTERS : CYRILLIC_LETTERS).concat(NON_LETTER_CODEBOOK);
 }
 function charToIndex(ch, lang) {
-  if (ch === START_CHAR) return START_IDX;
+  if (ch === START_UK_CHAR) return START_UK_IDX;
+  if (ch === START_EN_CHAR) return START_EN_IDX;
   if (ch === PAD_CHAR) return PAD_IDX;
   const table = glyphTable(lang);
   return table.indexOf(ch);
 }
 function indexToChar(idx, lang) {
-  if (idx === START_IDX) return START_CHAR;
+  if (idx === START_UK_IDX) return START_UK_CHAR;
+  if (idx === START_EN_IDX) return START_EN_CHAR;
   if (idx === PAD_IDX) return PAD_CHAR;
   const table = glyphTable(lang);
   return table[idx];
 }
 
-/* ================================================================
-   ПРАПОРЕЦЬ МОВИ — 1 виділений біт поза звичайними символьними слотами
-   ================================================================
-   Той самий 6-бітний код означає РІЗНУ літеру залежно від мови (як
-   перемикач розкладки клавіатури) — тому декодеру треба десь узяти цю
-   інформацію ДО того, як він інтерпретує індекси букв. Замість того щоб
-   міняти арифметику символьних слотів (ризиковано — вона й так на межі
-   64 кодів), прапорець мови займає ОДИН конкретний, фіксований і завжди
-   один і той самий фізичний слот — з тих, що й так завжди зарезервовані
-   й порожні (RESERVED_EACH_SIDE, буфер навколо кожної межі секції).
-   Місткість повідомлення це НЕ зменшує: цей слот ніколи не брав участі
-   в кодуванні символів.
-   Обрано: рівень 2 (найзовнішній, найдалі від маяків — нуль ризику
-   візуально накластись на бичаче око), перший зарезервований слот
-   одразу після межі секції 0 (глобальний слот rawCount*0 + 0).
-   ================================================================ */
-const LANG_FLAG_LEVEL = 2;
-const LANG_FLAG_LOCAL_SLOT = 0; // перший із RESERVED_EACH_SIDE слотів на межі секції 0
 
+/* Прапорець мови більше не потребує окремої мітки на диску — див.
+   START_UK_CHAR/START_EN_CHAR вище. Який зі СТАРТів знайде
+   reassembleWithRotation при пошуку правильного повороту — та й мова. */
 const MESSAGE_CHARS_FOR_UI = { uk: CYRILLIC_LETTERS.filter(Boolean), en: LATIN_LETTERS.filter(Boolean) };
+
 
 const ACTIVE_BITS_PER_SECTION = LEVELS.reduce((sum, l) => sum + l.activeCount, 0);
 const DATA_SYMBOL_SLOTS = Math.floor((ACTIVE_BITS_PER_SECTION * 3) / BITS_PER_SYMBOL);
@@ -339,7 +337,7 @@ function textToSections(message, lang) {
   if (message.length > MAX_MESSAGE_LEN) {
     throw new Error('Задовге повідомлення (максимум ' + MAX_MESSAGE_LEN + ')');
   }
-  const symbols = [START_CHAR].concat(message.split(''));
+  const symbols = [(lang === 'en' ? START_EN_CHAR : START_UK_CHAR)].concat(message.split(''));
   while (symbols.length < DATA_SYMBOL_SLOTS) symbols.push(PAD_CHAR);
 
   const sections = [[], [], []];
@@ -387,7 +385,7 @@ function decodeSectionsToText(sections, lang) {
       const bits = sections[sec].slice(pos * BITS_PER_SYMBOL, (pos + 1) * BITS_PER_SYMBOL);
       const idx = parseInt(bits.join(''), 2);
       const ch = indexToChar(idx, lang);
-      if (ch === START_CHAR) continue;
+      if (ch === START_UK_CHAR || ch === START_EN_CHAR) continue;
       if (ch === PAD_CHAR) return text;
       text += (ch === undefined || ch === null) ? '?' : ch;
     }
@@ -486,13 +484,12 @@ function render(ctx, sections, logoImg, lang) {
     });
   }
 
-  // Прапорець мови: форсуємо ОДИН конкретний зарезервований слот на
-  // LANG_FLAG_LEVEL — 1, якщо латиниця, 0 (порожньо), якщо кирилиця.
-  // Це відбувається ПІСЛЯ звичайного заповнення даними, тому гарантовано
-  // перезаписує (а не змішується з) те, що там і так завжди мало бути 0.
-  fullByLevel[LANG_FLAG_LEVEL][LANG_FLAG_LOCAL_SLOT] = (lang === 'en') ? 1 : 0;
-
   LEVELS.forEach((lvl, li) => drawDataRing(ctx, lvl, fullByLevel[li]));
+
+  // Мова більше не малюється окремо: вона вже "всередині" бітів
+  // СТАРТ-символу (START_UK_CHAR/START_EN_CHAR), який і так кодується
+  // як звичайний символьний слот на позиції 0 — жодної додаткової
+  // геометрії на диску для цього більше не потрібно.
 
   for (const deg of QUADRANT_CENTER_DEG) {
     const rad = deg * Math.PI / 180;
@@ -881,12 +878,13 @@ function reassembleWithRotation(physicalSections) {
     });
     const first6 = sections[0].slice(0, BITS_PER_SYMBOL);
     const idx = parseInt(first6.join(''), 2);
-    if (idx === START_IDX) {
-      return { sections, rot, startOk: true };
-    }
+    // Який зі СТАРТів знайдено на позиції 0 — та й мова: жодної
+    // окремої мітки на диску для цього більше не потрібно.
+    if (idx === START_UK_IDX) return { sections, rot, startOk: true, lang: 'uk' };
+    if (idx === START_EN_IDX) return { sections, rot, startOk: true, lang: 'en' };
   }
   const sections0 = [0, 1, 2, 3].map(logicalIdx => physicalSections[logicalIdx].reduce((acc, arr) => acc.concat(arr), []));
-  return { sections: sections0, rot: 0, startOk: false };
+  return { sections: sections0, rot: 0, startOk: false, lang: 'uk' };
 }
 
 function checksumAgreement(sections) {
@@ -896,36 +894,6 @@ function checksumAgreement(sections) {
     if ((d0[i] ^ d1[i] ^ d2[i]) === cs[i]) agree++;
   }
   return agree / ACTIVE_BITS_PER_SECTION;
-}
-
-/* Прапорець мови читається ТОЧНО тим самим способом (гомографія +
-   усереднення), просто для одного конкретного локального слота
-   LANG_FLAG_LOCAL_SLOT на рівні LANG_FLAG_LEVEL, а не для всього
-   набору символьних слотів. Порівнюємо з порогом ЦЬОГО Ж рівня, який
-   ми вже порахували в sampleAllLevels (levelThresholds), щоб не
-   вводити ще один окремий поріг. */
-function readLangFlag(imgData, W, H, transform, levelThresholds) {
-  const data = imgData.data;
-  function lumAt(x, y) {
-    x = Math.round(x); y = Math.round(y);
-    if (x < 0 || x >= W || y < 0 || y >= H) return 255;
-    const i = (y * W + x) * 4;
-    return data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
-  }
-  const lvl = LEVELS[LANG_FLAG_LEVEL];
-  const angle = (LANG_FLAG_LOCAL_SLOT + 0.5) * lvl.angleStepRad; // сектор 0, тому globalSlot === localSlot
-  const dr = TICK_WIDTH * 0.3, da = lvl.angleStepRad * 0.15;
-  const subOffsets = [{ rr: 0, aa: 0 }, { rr: dr, aa: 0 }, { rr: -dr, aa: 0 }, { rr: 0, aa: da }, { rr: 0, aa: -da }];
-  let sum = 0;
-  for (const o of subOffsets) {
-    const r = lvl.radius + o.rr, a = angle + o.aa;
-    const lx = Math.cos(a) * r, ly = Math.sin(a) * r;
-    const p = applyHomography(transform, lx, ly);
-    sum += lumAt(p.x, p.y);
-  }
-  const avg = sum / subOffsets.length;
-  const isOn = avg < levelThresholds[LANG_FLAG_LEVEL];
-  return isOn ? 'en' : 'uk';
 }
 
 function detectAndDecode(imgData, W, H, hiImgData, hiW, hiH) {
@@ -958,9 +926,8 @@ function detectAndDecode(imgData, W, H, hiImgData, hiW, hiH) {
 
   const transform = solveHomography(LOCAL_ANCHORS, samplePts);
   const { physicalSections, levelThresholds } = sampleAllLevels(sampleImg, sampleW, sampleH, transform);
-  const { sections, startOk } = reassembleWithRotation(physicalSections);
+  const { sections, startOk, lang } = reassembleWithRotation(physicalSections);
   const agreement = checksumAgreement(sections);
-  const lang = readLangFlag(sampleImg, sampleW, sampleH, transform, levelThresholds);
 
   updateAxisState(pts, scalePx);
 
