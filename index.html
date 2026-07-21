@@ -92,6 +92,24 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 button.secondary { background: rgba(255,255,255,0.12); color: #fff; box-shadow: none; border: 1px solid rgba(255,255,255,0.25); }
 button.lang-toggle { background: rgba(255,255,255,0.18); color: #fff; font-size: 12px; padding: 8px 12px; }
 canvas#previewCanvas { width: 100%; aspect-ratio: 1 / 1; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+
+.joystick {
+  display: grid;
+  grid-template-columns: 44px 44px 44px;
+  grid-template-rows: 44px 44px 44px;
+  gap: 4px;
+  justify-content: center;
+  margin-top: 4px;
+}
+.joy-btn {
+  padding: 0; font-size: 16px; line-height: 1; touch-action: none;
+  user-select: none; -webkit-user-select: none;
+}
+.joy-up { grid-column: 2; grid-row: 1; }
+.joy-left { grid-column: 1; grid-row: 2; }
+.joy-mid { grid-column: 2; grid-row: 2; background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.25); box-shadow: none; }
+.joy-right { grid-column: 3; grid-row: 2; }
+.joy-down { grid-column: 2; grid-row: 3; }
 .error { font-size: 13px; color: #ff8a8a; min-height: 18px; font-weight: 500; }
 .capacity-note { font-size: 12px; color: rgba(255,255,255,0.5); }
 
@@ -142,11 +160,27 @@ textarea { width: 100%; height: 180px; font-family: monospace; font-size: 11px; 
     <div style="display: flex; gap: 8px; flex-wrap: wrap;">
       <input type="file" id="logoInput" accept="image/png, image/jpeg" style="flex: 1; min-width: 150px;" />
       <div style="display: flex; gap: 4px;">
-        <button class="secondary" id="centerLogoBtn" style="padding: 4px 8px; font-size: 12px; white-space: nowrap;">Центр</button>
         <button class="secondary" id="clearLogoBtn" style="padding: 4px 8px; font-size: 12px; white-space: nowrap;">Очистити</button>
       </div>
     </div>
   </div>
+
+  <div class="input-group" id="logoJoystickGroup" style="display: none; align-items: center;">
+    <label>Позиція лого (утримуй для швидкого руху)</label>
+    <div class="joystick">
+      <button type="button" class="joy-btn joy-up" data-dx="0" data-dy="-1" aria-label="Вгору">▲</button>
+      <button type="button" class="joy-btn joy-left" data-dx="-1" data-dy="0" aria-label="Ліворуч">◀</button>
+      <button type="button" class="joy-btn joy-mid" id="joyCenterBtn" aria-label="Центр">●</button>
+      <button type="button" class="joy-btn joy-right" data-dx="1" data-dy="0" aria-label="Праворуч">▶</button>
+      <button type="button" class="joy-btn joy-down" data-dx="0" data-dy="1" aria-label="Вниз">▼</button>
+    </div>
+    <div style="display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 10px;">
+      <label for="logoScaleSlider" style="min-width: 60px; margin: 0;">Масштаб</label>
+      <input type="range" id="logoScaleSlider" min="50" max="200" value="100" style="flex: 1;" />
+      <span class="counter" id="logoScaleLabel" style="min-width: 42px; text-align: right;">100%</span>
+    </div>
+  </div>
+
 
   <div class="input-group" style="display: flex; flex-direction: row; gap: 10px; flex-wrap: wrap;">
     <div style="flex: 1; min-width: 120px;">
@@ -399,7 +433,6 @@ function decodeSectionsToText(sections, lang) {
    ================================================================ */
 const bitsColor = document.getElementById('bitsColor');
 const anchorsColor = document.getElementById('anchorsColor');
-const centerLogoBtn = document.getElementById('centerLogoBtn');
 const clearLogoBtn = document.getElementById('clearLogoBtn');
 const langToggleBtn = document.getElementById('langToggleBtn');
 
@@ -453,10 +486,6 @@ function drawDataRing(ctx, lvl, full) {
   }
 }
 
-centerLogoBtn.addEventListener('click', () => {
-  logoX = CENTER.x; logoY = CENTER.y;
-  refresh();
-});
 bitsColor.addEventListener('input', refresh);
 anchorsColor.addEventListener('input', refresh);
 langToggleBtn.addEventListener('click', () => {
@@ -503,7 +532,8 @@ function render(ctx, sections, logoImg, lang) {
   ctx.arc(CENTER.x, CENTER.y, LOGO_R, 0, Math.PI * 2);
   ctx.clip();
   if (logoImg) {
-    const scale = Math.max((LOGO_R * 2) / logoImg.width, (LOGO_R * 2) / logoImg.height);
+    const coverScale = Math.max((LOGO_R * 2) / logoImg.width, (LOGO_R * 2) / logoImg.height);
+    const scale = coverScale * logoScale;
     const w = logoImg.width * scale, h = logoImg.height * scale;
     ctx.drawImage(logoImg, logoX - w / 2, logoY - h / 2, w, h);
   } else {
@@ -534,10 +564,14 @@ const counter = document.getElementById('counter');
 const errorBox = document.getElementById('errorBox');
 const logoInput = document.getElementById('logoInput');
 const downloadBtn = document.getElementById('downloadBtn');
+const logoJoystickGroup = document.getElementById('logoJoystickGroup');
+const joyCenterBtn = document.getElementById('joyCenterBtn');
+const logoScaleSlider = document.getElementById('logoScaleSlider');
+const logoScaleLabel = document.getElementById('logoScaleLabel');
 let currentLogoImg = null;
 let currentSections = null;
 let logoX = CENTER.x, logoY = CENTER.y;
-let isDragging = false;
+let logoScale = 1;
 
 function refresh() {
   const text = msgInput.value.toUpperCase();
@@ -558,11 +592,15 @@ function refresh() {
 msgInput.addEventListener('input', refresh);
 logoInput.addEventListener('change', () => {
   const file = logoInput.files[0];
-  if (!file) { currentLogoImg = null; refresh(); return; }
+  if (!file) { currentLogoImg = null; logoJoystickGroup.style.display = 'none'; refresh(); return; }
   const img = new Image();
   img.onload = () => {
     currentLogoImg = img;
     logoX = CENTER.x; logoY = CENTER.y;
+    logoScale = 1;
+    logoScaleSlider.value = 100;
+    logoScaleLabel.textContent = '100%';
+    logoJoystickGroup.style.display = 'flex';
     refresh();
   };
   img.src = URL.createObjectURL(file);
@@ -570,37 +608,71 @@ logoInput.addEventListener('change', () => {
 clearLogoBtn.addEventListener('click', () => {
   currentLogoImg = null;
   logoInput.value = '';
+  logoScale = 1;
+  logoScaleSlider.value = 100;
+  logoScaleLabel.textContent = '100%';
+  logoJoystickGroup.style.display = 'none';
   refresh();
   log('Логотип очищено.');
 });
-
-canvas.addEventListener('mousedown', (e) => {
+logoScaleSlider.addEventListener('input', () => {
+  logoScale = parseInt(logoScaleSlider.value, 10) / 100;
+  logoScaleLabel.textContent = logoScaleSlider.value + '%';
   if (!currentLogoImg) return;
-  const rect = canvas.getBoundingClientRect();
-  const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-  const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-  if (Math.hypot(x - CENTER.x, y - CENTER.y) < LOGO_R) {
-    isDragging = true;
-  }
+  render(ctx, currentSections, currentLogoImg, currentLang);
 });
-canvas.addEventListener('mousemove', (e) => {
-  if (!isDragging) return;
-  const rect = canvas.getBoundingClientRect();
-  const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-  const y = (e.clientY - rect.top) * (canvas.height / rect.height);
 
-  const dist = Math.hypot(x - CENTER.x, y - CENTER.y);
-  if (dist < LOGO_R) {
-    logoX = x; logoY = y;
-  } else {
-    const angle = Math.atan2(y - CENTER.y, x - CENTER.x);
+
+
+/* ================================================================
+   ДЖОЙСТИК ПОЗИЦІОНУВАННЯ ЛОГО — 4-сторонні кнопки замість
+   перетягування мишею. Pointer Events працюють однаково для миші,
+   тачскріна й пера, тож окремих обробників для ПК/мобільних не треба.
+   ================================================================ */
+const JOY_STEP = 4;
+const JOY_REPEAT_MS = 90;
+let joyInterval = null;
+
+function clampLogoToCircle() {
+  const dx = logoX - CENTER.x, dy = logoY - CENTER.y;
+  const d = Math.hypot(dx, dy);
+  if (d > LOGO_R) {
+    const angle = Math.atan2(dy, dx);
     logoX = CENTER.x + Math.cos(angle) * LOGO_R;
     logoY = CENTER.y + Math.sin(angle) * LOGO_R;
   }
+}
+function nudgeLogo(dx, dy) {
+  if (!currentLogoImg) return;
+  logoX += dx * JOY_STEP;
+  logoY += dy * JOY_STEP;
+  clampLogoToCircle();
+  render(ctx, currentSections, currentLogoImg, currentLang);
+}
+function stopJoy() {
+  if (joyInterval) { clearInterval(joyInterval); joyInterval = null; }
+}
+function startJoy(dx, dy) {
+  stopJoy();
+  nudgeLogo(dx, dy);
+  joyInterval = setInterval(() => nudgeLogo(dx, dy), JOY_REPEAT_MS);
+}
+document.querySelectorAll('.joy-btn[data-dx]').forEach(btn => {
+  const dx = parseInt(btn.dataset.dx, 10);
+  const dy = parseInt(btn.dataset.dy, 10);
+  btn.addEventListener('pointerdown', (e) => { e.preventDefault(); startJoy(dx, dy); });
+  btn.addEventListener('pointerup', stopJoy);
+  btn.addEventListener('pointerleave', stopJoy);
+  btn.addEventListener('pointercancel', stopJoy);
+});
+joyCenterBtn.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  if (!currentLogoImg) return;
+  logoX = CENTER.x; logoY = CENTER.y;
   render(ctx, currentSections, currentLogoImg, currentLang);
 });
-canvas.addEventListener('mouseup', () => { isDragging = false; });
-canvas.addEventListener('mouseleave', () => { isDragging = false; });
+window.addEventListener('pointerup', stopJoy);
+
 
 function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
@@ -732,10 +804,43 @@ const COLD_DIST_MIN_RATIO = 0.55;
 const COLD_DIST_MAX_RATIO = 2.0;
 const SIDE_MATCH_TOL_FACTOR = 0.8;
 
+const QUAD_RADIUS_SPREAD_MAX = 0.6; // (max-min)/med радіусів — щоб не обрати випадковий шумовий контур за 4-й маяк
+
+// Коли OpenCV вже реально знайшов ≥4 кандидати (типово і під кутом теж —
+// нахил змінює їхню форму на диску, але не заважає їх виявити), не варто
+// вгадувати позиції бічних маяків через ідеальний перпендикуляр до осі
+// (те припущення правильне лише для виду майже прямо зверху/збоку).
+// Замість цього беремо реально знайдені точки й просто впорядковуємо їх
+// за кутом навколо їхнього спільного центру — той самий напрямок обходу,
+// що й у axisToCyclicPoints, тож сумісний з рештою пайплайна без змін.
+function coldStartFromQuad(candidates) {
+  let chosen = candidates;
+  if (chosen.length > 4) {
+    const radii = chosen.map(c => c.radius).slice().sort((a, b) => a - b);
+    const med = radii[Math.floor(radii.length / 2)];
+    chosen = chosen.slice().sort((a, b) => Math.abs(a.radius - med) - Math.abs(b.radius - med)).slice(0, 4);
+  }
+  if (chosen.length !== 4) return null;
+
+  const radii = chosen.map(c => c.radius);
+  const minR = Math.min(...radii), maxR = Math.max(...radii), medR = radii.slice().sort((a, b) => a - b)[1];
+  if (medR <= 0 || (maxR - minR) / medR > QUAD_RADIUS_SPREAD_MAX) return null;
+
+  const cx = chosen.reduce((s, c) => s + c.x, 0) / 4;
+  const cy = chosen.reduce((s, c) => s + c.y, 0) / 4;
+  const ordered = chosen.slice().sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+  const avgRadius = radii.reduce((s, r) => s + r, 0) / 4;
+  return { ok: true, points: ordered, scalePx: avgRadius };
+}
+
 function coldStartFromCandidates(candidates) {
   if (candidates.length < 2) {
     return { ok: false, reason: `замало підтверджених маяків (${candidates.length})` };
   }
+
+  const quad = coldStartFromQuad(candidates);
+  if (quad) return quad;
+
   const sorted = candidates.slice().sort((a, b) => b.y - a.y);
   const p0 = sorted[0];
   const distEstimate = p0.radius * (FINDER_R * 2 / FINDER_OUTER_RADIUS);
