@@ -1061,6 +1061,7 @@ function sampleAllLevelsMat(imgData, pts) {
 }
 
 function reassembleWithRotation(physicalSections) {
+  const matches = [];
   for (let rot = 0; rot < SECTIONS; rot++) {
     const sections = [0, 1, 2, 3].map(logicalIdx => {
       const p = (logicalIdx + rot) % SECTIONS;
@@ -1070,11 +1071,20 @@ function reassembleWithRotation(physicalSections) {
     const idx = parseInt(first6.join(''), 2);
     // Який зі СТАРТів знайдено на позиції 0 — та й мова: жодної
     // окремої мітки на диску для цього більше не потрібно.
-    if (idx === START_UK_IDX) return { sections, rot, startOk: true, lang: 'uk' };
-    if (idx === START_EN_IDX) return { sections, rot, startOk: true, lang: 'en' };
+    if (idx === START_UK_IDX) matches.push({ sections, rot, lang: 'uk' });
+    else if (idx === START_EN_IDX) matches.push({ sections, rot, lang: 'en' });
   }
+
+  if (matches.length === 1) {
+    return { sections: matches[0].sections, rot: matches[0].rot, startOk: true, ambiguous: false, lang: matches[0].lang };
+  }
+
+  // 0 збігів — валідного старту немає; 2+ збігів — неоднозначно, який
+  // поворот правильний насправді (можливо лише як рідкісний випадковий
+  // збіг, ~1/32 шансу на кожен "не той" поворот). В обох випадках кадр
+  // НЕ приймається — замість тихого вибору першого-ліпшого повороту.
   const sections0 = [0, 1, 2, 3].map(logicalIdx => physicalSections[logicalIdx].reduce((acc, arr) => acc.concat(arr), []));
-  return { sections: sections0, rot: 0, startOk: false, lang: 'uk' };
+  return { sections: sections0, rot: 0, startOk: false, ambiguous: matches.length > 1, lang: 'uk' };
 }
 
 function checksumAgreement(sections) {
@@ -1113,12 +1123,12 @@ function detectAndDecode(imgData, W, H, hiImgData, hiW, hiH) {
   const samplePts = useHiRes ? pts.map(p => ({ x: p.x * scale, y: p.y * scale })) : pts;
 
   const { physicalSections } = sampleAllLevelsMat(sampleImg, samplePts);
-  const { sections, startOk, lang } = reassembleWithRotation(physicalSections);
+  const { sections, startOk, ambiguous, lang } = reassembleWithRotation(physicalSections);
   const agreement = checksumAgreement(sections);
 
   updateAxisState(pts, scalePx);
 
-  return { ok: true, mode, pts, scalePx, sections, startOk, agreement, lang };
+  return { ok: true, mode, pts, scalePx, sections, startOk, ambiguous, agreement, lang };
 }
 
 const AXIS_EMA_ALPHA = 0.35;
@@ -1343,7 +1353,9 @@ function scanFrame() {
   }
   if (!det.startOk || det.agreement < MIN_AGREEMENT) {
     recentCentroids = []; recentTexts = [];
-    const reason = !det.startOk ? 'старт-символ не збігається' : `узгодженість чексуми ${(det.agreement*100).toFixed(0)}%`;
+    const reason = det.ambiguous
+      ? 'неоднозначно: кілька поворотів одночасно пройшли старт-перевірку'
+      : (!det.startOk ? 'старт-символ не збігається' : `узгодженість чексуми ${(det.agreement*100).toFixed(0)}%`);
     drawLiveOverlay(size, size, det, `Маяки знайдено (${det.mode}), ${reason}`);
     document.getElementById('camStatus').textContent = `Кандидат — ${reason}, шукаю стабільніший кадр...`;
     if (frameCounter % 5 === 0) log(`Кадр ${frameCounter}: маяки зловлено (${det.mode}), ${reason}`);
