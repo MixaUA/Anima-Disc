@@ -1050,18 +1050,50 @@ function sampleAllLevelsMat(imgData, pts) {
     // віконного семплінгу одночасно), щоб чітко бачити ефект саме
     // цієї заміни на реальному друці.
     cv.threshold(warped, thresh, 0, 255, cv.THRESH_BINARY_INV | cv.THRESH_OTSU);
+    // Віконна вибірка замість однієї точки: на друкованій копії (тонер
+    // з розтіканням, текстура паперу, лист не ідеально плаский) номінальний
+    // центр слота регулярно "з'їжджає" на 1-3px повз межу клітини —
+    // одна точка тоді читає сусідню (протилежну) ділянку. Беремо до 9
+    // точок навколо центру й рахуємо "1", якщо хоч одна темна (OR) —
+    // той самий прийом, що й у квадрат-коді, але з кутовим півдіапазоном,
+    // каліброваним ПІД КОЖЕН рівень окремо, а не однією константою на
+    // всі три (в них клітини рівномірні, у нас кутовий крок і радіус
+    // різні на кожному з 3 рівнів — спільна константа була б завузькою
+    // для одного рівня і задовгою для іншого). Половина зазору між
+    // сусідніми "1"-бітами становить 0.22*angleStepRad з кожного боку
+    // (paddingAngle у drawDataRing) — беремо 0.2*angleStepRad, з запасом
+    // всередині цього зазору, щоб не зачепити сусідній слот. Радіально
+    // TICK_WIDTH спільний для всіх рівнів, тому фіксовані ±2px безпечні
+    // для всіх (половина товщини лінії — 3.5px).
+    // Прямий доступ до thresh.data замість thresh.ucharPtr() навмисно:
+    // ucharPtr створює новий об'єкт при КОЖНОМУ виклику, а тут тепер до
+    // 9 викликів на слот замість 1 — саме те, що в референсі "наглухо
+    // вішало браузер у циклі".
+    const threshData = thresh.data;
+    const threshCols = thresh.cols;
+    const RADIAL_OFFSETS_PX = [-2, 0, 2];
+
     LEVELS.forEach((lvl, li) => {
+      const angleHalf = lvl.angleStepRad * 0.2;
+      const angleOffsets = [-angleHalf, 0, angleHalf];
       for (let sec = 0; sec < SECTIONS; sec++) {
         lvl.activeLocalSlots.forEach((slot, k) => {
           const globalSlot = sec * lvl.rawCount + slot;
-          const angle = (globalSlot + 0.5) * lvl.angleStepRad;
-          const lx = CENTER.x + Math.cos(angle) * lvl.radius;
-          const ly = CENTER.y + Math.sin(angle) * lvl.radius;
-          const px = Math.round(lx);
-          const py = Math.round(ly);
-          if (px >= 0 && px < DIAGRAM && py >= 0 && py < DIAGRAM) {
-            physicalSections[sec][li][k] = thresh.ucharPtr(py, px)[0] > 128 ? 1 : 0;
+          const centerAngle = (globalSlot + 0.5) * lvl.angleStepRad;
+          let bit = 0;
+          outer:
+          for (const dr of RADIAL_OFFSETS_PX) {
+            const r = lvl.radius + dr;
+            for (const da of angleOffsets) {
+              const a = centerAngle + da;
+              const px = Math.round(CENTER.x + Math.cos(a) * r);
+              const py = Math.round(CENTER.y + Math.sin(a) * r);
+              if (px >= 0 && px < DIAGRAM && py >= 0 && py < DIAGRAM) {
+                if (threshData[py * threshCols + px] > 128) { bit = 1; break outer; }
+              }
+            }
           }
+          physicalSections[sec][li][k] = bit;
         });
       }
     });
