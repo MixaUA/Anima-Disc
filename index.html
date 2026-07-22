@@ -1036,7 +1036,20 @@ function sampleAllLevelsMat(imgData, pts) {
     warped = new cv.Mat();
     cv.warpPerspective(gray, warped, trans, new cv.Size(DIAGRAM, DIAGRAM));
     thresh = new cv.Mat();
-    cv.adaptiveThreshold(warped, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 21, 5);
+    // Otsu замість локального adaptiveThreshold: на вже вирівняному
+    // кадрі (лише сам код, без стороннього фону) глобальний поріг
+    // стійкіший саме на друкованих копіях — локальний адаптивний поріг
+    // на суцільних чорних ділянках (злиті дуги/повне кільце) починає
+    // "продірявлювати" їхню середину, бо локальне сусідство навколо
+    // внутрішнього пікселя такої плями саме й стає надто темним.
+    // РИЗИК, який тримаємо на контролі: короткі повідомлення — це
+    // переважно PAD (майже весь диск білий, лише тонкі поодинокі
+    // риски + 4 маяки) — Otsu передбачає більш-менш збалансовану
+    // бімодальність, і при малій частці чорного поріг може зміститись
+    // і почати губити саме тонкі риски. Змінюємо ізольовано (без
+    // віконного семплінгу одночасно), щоб чітко бачити ефект саме
+    // цієї заміни на реальному друці.
+    cv.threshold(warped, thresh, 0, 255, cv.THRESH_BINARY_INV | cv.THRESH_OTSU);
     LEVELS.forEach((lvl, li) => {
       for (let sec = 0; sec < SECTIONS; sec++) {
         lvl.activeLocalSlots.forEach((slot, k) => {
