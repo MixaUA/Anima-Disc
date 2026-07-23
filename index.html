@@ -1200,8 +1200,11 @@ let signalLevel = 0;
 
 function drawGuide(W, H) {
   const gc = document.getElementById('guideCanvas');
-  gc.width = W; gc.height = H;
+  const dpr = window.devicePixelRatio || 1;
+  gc.width = W * dpr;
+  gc.height = H * dpr;
   const g = gc.getContext('2d');
+  g.scale(dpr, dpr);
   g.clearRect(0, 0, W, H);
   const cx = W / 2, cy = H / 2;
   const beaconR = Math.min(W, H) * 0.42 * (FINDER_R / 225) * 0.9;
@@ -1221,10 +1224,6 @@ function drawGuide(W, H) {
   g.moveTo(cx - 8, cy); g.lineTo(cx + 8, cy);
   g.moveTo(cx, cy - 8); g.lineTo(cx, cy + 8);
   g.stroke();
-  g.font = '11px monospace';
-  g.textAlign = 'center';
-  g.fillStyle = 'rgba(255,255,255,0.5)';
-  g.fillText('тримайте диск у межах кола', cx, (cy + beaconR + 16 < H - 4) ? cy + beaconR + 16 : cy - beaconR - 8);
 }
 function clearGuide() {
   const gc = document.getElementById('guideCanvas');
@@ -1293,8 +1292,10 @@ function uiLoop() {
   const H = wrapEl.clientHeight || 320;
 
   const oc = document.getElementById('overlayCanvas');
-  oc.width = W; oc.height = H;
+  const dpr = window.devicePixelRatio || 1;
+  oc.width = W * dpr; oc.height = H * dpr;
   const octx = oc.getContext('2d');
+  octx.scale(dpr, dpr);
   octx.clearRect(0, 0, W, H);
 
   const cx = W / 2, cy = H / 2;
@@ -1353,8 +1354,10 @@ function uiLoop() {
 
 function drawDecodedOverlay(W, H, det) {
   const oc = document.getElementById('overlayCanvas');
-  oc.width = W; oc.height = H;
+  const dpr = window.devicePixelRatio || 1;
+  oc.width = W * dpr; oc.height = H * dpr;
   const octx = oc.getContext('2d');
+  octx.scale(dpr, dpr);
   octx.clearRect(0, 0, W, H);
   const pts = det.pts;
 
@@ -1463,7 +1466,8 @@ function rescan() {
   resetTracking();
   document.getElementById('camResultsBox').innerHTML = '';
   document.getElementById('rescanBtn').style.display = 'none';
-  document.getElementById('overlayCanvas').getContext('2d').clearRect(0,0,500,500);
+  const oc = document.getElementById('overlayCanvas');
+  oc.getContext('2d').clearRect(0, 0, oc.width, oc.height);
 }
 
 document.getElementById('camToggleBtn').addEventListener('click', toggleCamera);
