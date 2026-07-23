@@ -198,7 +198,10 @@ textarea { width: 100%; height: 180px; font-family: monospace; font-size: 11px; 
 
   <canvas id="previewCanvas" width="500" height="500"></canvas>
 
-  <button id="downloadBtn">Завантажити PNG</button>
+  <div style="display: flex; gap: 8px;">
+    <button id="downloadBtn" style="flex: 1;">Завантажити PNG</button>
+    <button class="secondary" id="downloadSvgBtn" style="flex: 1;">SVG (шар)</button>
+  </div>
 </div>
 
 <div class="panel">
@@ -237,7 +240,7 @@ const LOGO_R = 128;
 const LEVEL_RADII = [156, 184, 212];
 const FINDER_LEVEL = 1;
 const FINDER_R = LEVEL_RADII[FINDER_LEVEL];
-const TICK_WIDTH = 7;
+const TICK_WIDTH = 10;
 const SECTIONS = 4;
 const QUADRANT_CENTER_DEG = [0, 90, 180, 270];
 const ACTIVE_PER_LEVEL = [12, 18, 24];
@@ -436,9 +439,18 @@ const anchorsColor = document.getElementById('anchorsColor');
 const clearLogoBtn = document.getElementById('clearLogoBtn');
 const langToggleBtn = document.getElementById('langToggleBtn');
 
-function drawFinder(ctx, cx, cy) {
-  ctx.fillStyle = DISC_BG;
-  ctx.beginPath(); ctx.arc(cx, cy, FINDER_OUTER_RADIUS, 0, Math.PI * 2); ctx.fill();
+function drawFinder(ctx, cx, cy, transparentBg) {
+  if (transparentBg) {
+    // Замість заливки кольором диска — реально прозора "дірка" під кільцем
+    // маяка, незалежно від того, що намальовано під ним (дуга бітів).
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath(); ctx.arc(cx, cy, FINDER_OUTER_RADIUS, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  } else {
+    ctx.fillStyle = DISC_BG;
+    ctx.beginPath(); ctx.arc(cx, cy, FINDER_OUTER_RADIUS, 0, Math.PI * 2); ctx.fill();
+  }
   ctx.strokeStyle = anchorsColor.value;
   ctx.lineWidth = FINDER_RING_WIDTH;
   ctx.beginPath();
@@ -448,41 +460,50 @@ function drawFinder(ctx, cx, cy) {
   ctx.beginPath(); ctx.arc(cx, cy, FINDER_DOT_RADIUS, 0, Math.PI * 2); ctx.fill();
 }
 
-function drawDataRing(ctx, lvl, full) {
-  const paddingAngle = (lvl.angleStepRad * 180 / Math.PI) * 0.22 * Math.PI / 180;
-  let visited = new Array(lvl.globalSlots).fill(false);
-
-  for (let i = 0; i < lvl.globalSlots; i++) {
+function extractRuns(full) {
+  const globalSlots = full.length;
+  const visited = new Array(globalSlots).fill(false);
+  const runs = [];
+  for (let i = 0; i < globalSlots; i++) {
     if (full[i] === 1 && !visited[i]) {
-      let start = i, end = i, count = 1;
+      let end = i, count = 1;
       visited[i] = true;
-      while (full[(end + 1) % lvl.globalSlots] === 1 && !visited[(end + 1) % lvl.globalSlots]) {
-        end = (end + 1) % lvl.globalSlots;
+      while (full[(end + 1) % globalSlots] === 1 && !visited[(end + 1) % globalSlots]) {
+        end = (end + 1) % globalSlots;
         visited[end] = true;
         count++;
-        if (count >= lvl.globalSlots) break;
+        if (count >= globalSlots) break;
       }
+      runs.push({ start: i, end, full: count >= globalSlots });
+    }
+  }
+  return runs;
+}
 
-      if (count >= lvl.globalSlots) {
-        ctx.beginPath();
-        ctx.arc(CENTER.x, CENTER.y, lvl.radius, 0, Math.PI * 2, false);
-        ctx.lineWidth = TICK_WIDTH;
-        ctx.strokeStyle = bitsColor.value;
-        ctx.stroke();
-        continue;
-      }
+function drawDataRing(ctx, lvl, full) {
+  const paddingAngle = (lvl.angleStepRad * 180 / Math.PI) * 0.22 * Math.PI / 180;
+  const runs = extractRuns(full);
 
-      let startAngle = start * lvl.angleStepRad + paddingAngle;
-      let endAngle = (end + 1) * lvl.angleStepRad - paddingAngle;
-      if (endAngle < startAngle) endAngle += Math.PI * 2;
-
+  for (const run of runs) {
+    if (run.full) {
       ctx.beginPath();
-      ctx.arc(CENTER.x, CENTER.y, lvl.radius, startAngle, endAngle, false);
+      ctx.arc(CENTER.x, CENTER.y, lvl.radius, 0, Math.PI * 2, false);
       ctx.lineWidth = TICK_WIDTH;
-      ctx.lineCap = 'round';
       ctx.strokeStyle = bitsColor.value;
       ctx.stroke();
+      continue;
     }
+
+    let startAngle = run.start * lvl.angleStepRad + paddingAngle;
+    let endAngle = (run.end + 1) * lvl.angleStepRad - paddingAngle;
+    if (endAngle < startAngle) endAngle += Math.PI * 2;
+
+    ctx.beginPath();
+    ctx.arc(CENTER.x, CENTER.y, lvl.radius, startAngle, endAngle, false);
+    ctx.lineWidth = TICK_WIDTH;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = bitsColor.value;
+    ctx.stroke();
   }
 }
 
@@ -495,13 +516,8 @@ langToggleBtn.addEventListener('click', () => {
   log(`Мова вводу перемкнена на: ${currentLang === 'en' ? 'латиниця' : 'кирилиця'}.`);
 });
 
-function render(ctx, sections, logoImg, lang) {
-  ctx.clearRect(0, 0, DIAGRAM, DIAGRAM);
-  ctx.fillStyle = DISC_BG;
-  ctx.fillRect(0, 0, DIAGRAM, DIAGRAM);
-
+function computeFullByLevel(sections) {
   const fullByLevel = LEVELS.map(lvl => new Array(lvl.globalSlots).fill(0));
-
   for (let s = 0; s < SECTIONS; s++) {
     const physicalLevels = sectionBitsToPhysicalLevels(sections[s]);
     const targetSection = (s + 3) % SECTIONS;
@@ -512,6 +528,18 @@ function render(ctx, sections, logoImg, lang) {
       }
     });
   }
+  return fullByLevel;
+}
+
+function render(ctx, sections, logoImg, lang, opts) {
+  const transparentBg = !!(opts && opts.transparentBg);
+  ctx.clearRect(0, 0, DIAGRAM, DIAGRAM);
+  if (!transparentBg) {
+    ctx.fillStyle = DISC_BG;
+    ctx.fillRect(0, 0, DIAGRAM, DIAGRAM);
+  }
+
+  const fullByLevel = computeFullByLevel(sections);
 
   LEVELS.forEach((lvl, li) => drawDataRing(ctx, lvl, fullByLevel[li]));
 
@@ -524,7 +552,7 @@ function render(ctx, sections, logoImg, lang) {
     const rad = deg * Math.PI / 180;
     const fx = CENTER.x + Math.cos(rad) * FINDER_R;
     const fy = CENTER.y + Math.sin(rad) * FINDER_R;
-    drawFinder(ctx, fx, fy);
+    drawFinder(ctx, fx, fy, transparentBg);
   }
 
   ctx.save();
@@ -536,11 +564,95 @@ function render(ctx, sections, logoImg, lang) {
     const scale = coverScale * logoScale;
     const w = logoImg.width * scale, h = logoImg.height * scale;
     ctx.drawImage(logoImg, logoX - w / 2, logoY - h / 2, w, h);
-  } else {
+  } else if (!transparentBg) {
     ctx.fillStyle = DISC_BG;
     ctx.fillRect(CENTER.x - LOGO_R, CENTER.y - LOGO_R, LOGO_R * 2, LOGO_R * 2);
   }
   ctx.restore();
+}
+
+/* ================================================================
+   SVG-ЕКСПОРТ — біти + маяки як один шар (без лого й без фону диска,
+   щоб можна було накласти на будь-яке власне тло в дизайн-редакторі).
+   Використовує ті самі extractRuns/computeFullByLevel, що й canvas-
+   рендер, тому геометрія гарантовано не розходиться з PNG.
+   ================================================================ */
+// Товщина дуг/кілець "запечена" у саму геометрію контуру (заповнені
+// форми), а не задана через stroke-width. Це навмисно: заливка завжди
+// масштабується разом з об'єктом, а обведення (stroke) — ні, якщо у
+// векторному редакторі (типово в Corel) вимкнено "масштабувати перо
+// разом з об'єктом". При зменшенні товщина лінії лишалась би фізично
+// незмінною, проміжки між сусідніми бітами ставали б тонші за неї —
+// і диск зливався б в суцільне кільце.
+function svgAnnulusPath(cx, cy, rOuter, rInner) {
+  const f = (n) => n.toFixed(2);
+  return `M ${f(cx + rOuter)} ${f(cy)} ` +
+    `A ${rOuter} ${rOuter} 0 1 1 ${f(cx - rOuter)} ${f(cy)} ` +
+    `A ${rOuter} ${rOuter} 0 1 1 ${f(cx + rOuter)} ${f(cy)} Z ` +
+    `M ${f(cx + rInner)} ${f(cy)} ` +
+    `A ${rInner} ${rInner} 0 1 0 ${f(cx - rInner)} ${f(cy)} ` +
+    `A ${rInner} ${rInner} 0 1 0 ${f(cx + rInner)} ${f(cy)} Z`;
+}
+function svgThickArcPath(cx, cy, r, startAngle, endAngle, halfWidth) {
+  const rOuter = r + halfWidth, rInner = r - halfWidth;
+  const largeArc = (endAngle - startAngle) > Math.PI ? 1 : 0;
+  const pt = (rad, ang) => ({ x: cx + rad * Math.cos(ang), y: cy + rad * Math.sin(ang) });
+  const p1 = pt(rOuter, startAngle), p2 = pt(rOuter, endAngle);
+  const p3 = pt(rInner, endAngle), p4 = pt(rInner, startAngle);
+  const f = (n) => n.toFixed(2);
+  return `M ${f(p1.x)} ${f(p1.y)} ` +
+    `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${f(p2.x)} ${f(p2.y)} ` +
+    `A ${halfWidth} ${halfWidth} 0 0 1 ${f(p3.x)} ${f(p3.y)} ` +
+    `A ${rInner} ${rInner} 0 ${largeArc} 0 ${f(p4.x)} ${f(p4.y)} ` +
+    `A ${halfWidth} ${halfWidth} 0 0 1 ${f(p1.x)} ${f(p1.y)} Z`;
+}
+
+function buildLayerSVG(sections) {
+  const fullByLevel = computeFullByLevel(sections);
+  const bits = bitsColor.value;
+  const anchors = anchorsColor.value;
+  const parts = [];
+
+  LEVELS.forEach((lvl, li) => {
+    const paddingAngle = (lvl.angleStepRad * 180 / Math.PI) * 0.22 * Math.PI / 180;
+    const runs = extractRuns(fullByLevel[li]);
+    for (const run of runs) {
+      if (run.full) {
+        const d = svgAnnulusPath(CENTER.x, CENTER.y, lvl.radius + TICK_WIDTH / 2, lvl.radius - TICK_WIDTH / 2);
+        parts.push(`<path fill-rule="evenodd" fill="${bits}" d="${d}" />`);
+        continue;
+      }
+      let startAngle = run.start * lvl.angleStepRad + paddingAngle;
+      let endAngle = (run.end + 1) * lvl.angleStepRad - paddingAngle;
+      if (endAngle < startAngle) endAngle += Math.PI * 2;
+
+      const d = svgThickArcPath(CENTER.x, CENTER.y, lvl.radius, startAngle, endAngle, TICK_WIDTH / 2);
+      parts.push(`<path fill="${bits}" d="${d}" />`);
+    }
+  });
+
+  for (const deg of QUADRANT_CENTER_DEG) {
+    const rad = deg * Math.PI / 180;
+    const fx = CENTER.x + Math.cos(rad) * FINDER_R;
+    const fy = CENTER.y + Math.sin(rad) * FINDER_R;
+    // Проміжок кільце/крапка навмисно нічим не заповнений — лишається
+    // прозорим, щоб шар можна було накласти на будь-яке власне тло.
+    const ringD = svgAnnulusPath(fx, fy, FINDER_OUTER_RADIUS, FINDER_OUTER_RADIUS - FINDER_RING_WIDTH);
+    parts.push(`<path fill-rule="evenodd" fill="${anchors}" d="${ringD}" />`);
+    parts.push(`<circle cx="${fx.toFixed(2)}" cy="${fy.toFixed(2)}" r="${FINDER_DOT_RADIUS}" fill="${anchors}" />`);
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${DIAGRAM} ${DIAGRAM}" width="${DIAGRAM}" height="${DIAGRAM}">\n` +
+    `<g id="round-code-layer">\n${parts.join('\n')}\n</g>\n</svg>`;
+}
+
+function triggerDownload(href, filename) {
+  const link = document.createElement('a');
+  link.href = href;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
 }
 
 /* ================================================================
@@ -564,6 +676,26 @@ const counter = document.getElementById('counter');
 const errorBox = document.getElementById('errorBox');
 const logoInput = document.getElementById('logoInput');
 const downloadBtn = document.getElementById('downloadBtn');
+const downloadSvgBtn = document.getElementById('downloadSvgBtn');
+downloadBtn.addEventListener('click', () => {
+  if (!currentSections) return;
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = DIAGRAM;
+  offCanvas.height = DIAGRAM;
+  const offCtx = offCanvas.getContext('2d');
+  render(offCtx, currentSections, currentLogoImg, currentLang, { transparentBg: true });
+  triggerDownload(offCanvas.toDataURL('image/png'), 'round-code.png');
+  log('PNG завантажено (прозорий фон, лого обрізане по колу).');
+});
+downloadSvgBtn.addEventListener('click', () => {
+  if (!currentSections) return;
+  const svg = buildLayerSVG(currentSections);
+  const blob = new Blob([svg], { type: 'image/svg+xml' });
+  const url = URL.createObjectURL(blob);
+  triggerDownload(url, 'round-code-layer.svg');
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  log('SVG-шар (біти + маяки) завантажено.');
+});
 const logoJoystickGroup = document.getElementById('logoJoystickGroup');
 const joyCenterBtn = document.getElementById('joyCenterBtn');
 const logoScaleSlider = document.getElementById('logoScaleSlider');
@@ -904,7 +1036,19 @@ function sampleAllLevelsMat(imgData, pts) {
     warped = new cv.Mat();
     cv.warpPerspective(gray, warped, trans, new cv.Size(DIAGRAM, DIAGRAM));
     thresh = new cv.Mat();
+    // Otsu замість локального adaptiveThreshold: на вже вирівняному
+    // ВІДКОЧЕНО до останнього підтверджено робочого стану (100% чек-суми
+    // з екрана): і Otsu, і віконна OR-вибірка по 9 точках виявились
+    // регресією — після їх додавання перестало читати навіть з екрана,
+    // де раніше було ідеально. Найімовірніший механізм: OR по 9 точках
+    // множить на ~9 шанс зачепити БУДЬ-ЯКИЙ шумовий/згладжений піксель
+    // (наприклад, антиаліасинг на межі сусідньої дуги) і хибно прочитати
+    // "0" як "1" — тобто рішення проти пропущених бітів (недочитані "1")
+    // ціною значно частіших хибних "1" там, де їх бути не мало. Питання
+    // друкованих смуг лишається відкритим, але діагностувати його треба
+    // окремо, від цієї підтверджено робочої бази, а не одночасно з нею.
     cv.adaptiveThreshold(warped, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 21, 5);
+
     LEVELS.forEach((lvl, li) => {
       for (let sec = 0; sec < SECTIONS; sec++) {
         lvl.activeLocalSlots.forEach((slot, k) => {
@@ -929,6 +1073,7 @@ function sampleAllLevelsMat(imgData, pts) {
 }
 
 function reassembleWithRotation(physicalSections) {
+  const matches = [];
   for (let rot = 0; rot < SECTIONS; rot++) {
     const sections = [0, 1, 2, 3].map(logicalIdx => {
       const p = (logicalIdx + rot) % SECTIONS;
@@ -938,11 +1083,20 @@ function reassembleWithRotation(physicalSections) {
     const idx = parseInt(first6.join(''), 2);
     // Який зі СТАРТів знайдено на позиції 0 — та й мова: жодної
     // окремої мітки на диску для цього більше не потрібно.
-    if (idx === START_UK_IDX) return { sections, rot, startOk: true, lang: 'uk' };
-    if (idx === START_EN_IDX) return { sections, rot, startOk: true, lang: 'en' };
+    if (idx === START_UK_IDX) matches.push({ sections, rot, lang: 'uk' });
+    else if (idx === START_EN_IDX) matches.push({ sections, rot, lang: 'en' });
   }
+
+  if (matches.length === 1) {
+    return { sections: matches[0].sections, rot: matches[0].rot, startOk: true, ambiguous: false, lang: matches[0].lang };
+  }
+
+  // 0 збігів — валідного старту немає; 2+ збігів — неоднозначно, який
+  // поворот правильний насправді (можливо лише як рідкісний випадковий
+  // збіг, ~1/32 шансу на кожен "не той" поворот). В обох випадках кадр
+  // НЕ приймається — замість тихого вибору першого-ліпшого повороту.
   const sections0 = [0, 1, 2, 3].map(logicalIdx => physicalSections[logicalIdx].reduce((acc, arr) => acc.concat(arr), []));
-  return { sections: sections0, rot: 0, startOk: false, lang: 'uk' };
+  return { sections: sections0, rot: 0, startOk: false, ambiguous: matches.length > 1, lang: 'uk' };
 }
 
 function checksumAgreement(sections) {
@@ -981,12 +1135,12 @@ function detectAndDecode(imgData, W, H, hiImgData, hiW, hiH) {
   const samplePts = useHiRes ? pts.map(p => ({ x: p.x * scale, y: p.y * scale })) : pts;
 
   const { physicalSections } = sampleAllLevelsMat(sampleImg, samplePts);
-  const { sections, startOk, lang } = reassembleWithRotation(physicalSections);
+  const { sections, startOk, ambiguous, lang } = reassembleWithRotation(physicalSections);
   const agreement = checksumAgreement(sections);
 
   updateAxisState(pts, scalePx);
 
-  return { ok: true, mode, pts, scalePx, sections, startOk, agreement, lang };
+  return { ok: true, mode, pts, scalePx, sections, startOk, ambiguous, agreement, lang };
 }
 
 const AXIS_EMA_ALPHA = 0.35;
@@ -1211,7 +1365,9 @@ function scanFrame() {
   }
   if (!det.startOk || det.agreement < MIN_AGREEMENT) {
     recentCentroids = []; recentTexts = [];
-    const reason = !det.startOk ? 'старт-символ не збігається' : `узгодженість чексуми ${(det.agreement*100).toFixed(0)}%`;
+    const reason = det.ambiguous
+      ? 'неоднозначно: кілька поворотів одночасно пройшли старт-перевірку'
+      : (!det.startOk ? 'старт-символ не збігається' : `узгодженість чексуми ${(det.agreement*100).toFixed(0)}%`);
     drawLiveOverlay(size, size, det, `Маяки знайдено (${det.mode}), ${reason}`);
     document.getElementById('camStatus').textContent = `Кандидат — ${reason}, шукаю стабільніший кадр...`;
     if (frameCounter % 5 === 0) log(`Кадр ${frameCounter}: маяки зловлено (${det.mode}), ${reason}`);
