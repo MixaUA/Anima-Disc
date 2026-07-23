@@ -246,9 +246,9 @@ const QUADRANT_CENTER_DEG = [0, 90, 180, 270];
 const ACTIVE_PER_LEVEL = [12, 18, 24];
 const RESERVED_EACH_SIDE = 2;
 
-const FINDER_OUTER_RADIUS = 13;
-const FINDER_RING_WIDTH = 4;
-const FINDER_GAP_WIDTH = 3;
+const FINDER_OUTER_RADIUS = 18;
+const FINDER_RING_WIDTH = 8;
+const FINDER_GAP_WIDTH = 6;
 const FINDER_DOT_RADIUS = FINDER_OUTER_RADIUS - FINDER_RING_WIDTH - FINDER_GAP_WIDTH;
 
 const DISC_BG = '#f5f0e8';
@@ -849,7 +849,7 @@ setTimeout(() => {
 function oddify(n) { return (n % 2 === 0) ? n + 1 : n; }
 const ADAPTIVE_C = 6;
 const MIN_MARKER_AREA = 6;
-const DOT_AREA_RATIO_MIN = 0.06;
+const DOT_AREA_RATIO_MIN = 0.03; // знижено з 0.06: новий маяк дає ratio ≈0.049 (крапка 4 / зовнішній 18)
 const DOT_AREA_RATIO_MAX = 0.5;
 const CONCENTRIC_TOL = 0.4;
 
