@@ -292,8 +292,17 @@ const FINDER_R = LEVEL_RADII[FINDER_LEVEL];
 const TICK_WIDTH = 10;
 const SECTIONS = 4;
 const QUADRANT_CENTER_DEG = [0, 90, 180, 270];
-const ACTIVE_PER_LEVEL = [12, 18, 24];
-const RESERVED_EACH_SIDE = 2;
+const ACTIVE_PER_LEVEL = [16, 18, 28];
+// Тиха зона потрібна лише навколо маяків (середній рівень, індекс 1) —
+// маяки фізично сидять тільки там (радіус LEVEL_RADII[1] = FINDER_R).
+// На 1 і 3 рівнях (RESERVED=0) немає жодного фізичного сусідства з
+// маяком (28px з кожного боку), тож слоти, які там ЗАВЖДИ малювались
+// як "0" про запас, тепер стають звичайними активними бітами даних —
+// rawCount/крок кута на цих двох рівнях лишається БУКВАЛЬНО тим самим
+// числом, що й раніше (12+2*2=16, 24+2*2=28) — фізичний розмір і крок
+// біта на друку не змінюється ні на піксель, змінюється лише те, що
+// ці позиції тепер несуть дані замість порожнечі.
+const RESERVED_EACH_SIDE_PER_LEVEL = [0, 2, 0];
 
 const FINDER_OUTER_RADIUS = 18;
 const FINDER_RING_WIDTH = 6;
@@ -304,11 +313,12 @@ const DISC_BG = '#f5f0e8';
 
 function levelGeometry(levelIndex) {
   const activeCount = ACTIVE_PER_LEVEL[levelIndex];
-  const rawCount = activeCount + RESERVED_EACH_SIDE * 2;
+  const reservedEachSide = RESERVED_EACH_SIDE_PER_LEVEL[levelIndex];
+  const rawCount = activeCount + reservedEachSide * 2;
   const globalSlots = rawCount * SECTIONS;
   const activeLocalSlots = [];
   for (let s = 0; s < rawCount; s++) {
-    if (s < RESERVED_EACH_SIDE || s >= rawCount - RESERVED_EACH_SIDE) continue;
+    if (s < reservedEachSide || s >= rawCount - reservedEachSide) continue;
     activeLocalSlots.push(s);
   }
   return {
