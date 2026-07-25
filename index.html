@@ -429,6 +429,20 @@ function renderAlphabetBlocks() {
 document.getElementById('capacityNote').textContent =
   `Місткість: ${ACTIVE_BITS_PER_SECTION} біт/секцію × 3 секції даних = ${DATA_SYMBOL_SLOTS} символьних слотів → максимум ${MAX_MESSAGE_LEN} символів.`;
 
+// Генератор псевдовипадкових бітів (маска) для хаотичності візерунка —
+// без цього коротке повідомлення (багато PAD, який у нашому кодбуку —
+// 111111, суцільні одиниці) зливається в один довгий суцільний прогін
+// через merge сусідніх "1" у drawDataRing: і естетично "пляма", і
+// потенційно та сама вразливість великих суцільних ділянок для
+// adaptiveThreshold, яку ми вже підозрювали раніше.
+function getMaskBit(sectionIdx, bitIdx) {
+  let n = sectionIdx * 73 + bitIdx * 37 + 11;
+  n = (n ^ (n << 13)) >>> 0;
+  n = (n ^ (n >>> 17)) >>> 0;
+  n = (n ^ (n << 5)) >>> 0;
+  return n & 1;
+}
+
 function textToSections(message, lang) {
   if (message.length > MAX_MESSAGE_LEN) {
     throw new Error('Задовге повідомлення (максимум ' + MAX_MESSAGE_LEN + ')');
@@ -452,6 +466,15 @@ function textToSections(message, lang) {
     checksum[i] = sections[0][i] ^ sections[1][i] ^ sections[2][i];
   }
   sections.push(checksum);
+
+  // Маскуємо ВСІ секції (включно з чек-сумою) — маска знімається XOR'ом
+  // ще до будь-якої перевірки чек-суми/старту при декодуванні, тож на
+  // логіку це не впливає, тільки на те, що фізично малюється на диску.
+  for (let s = 0; s < SECTIONS; s++) {
+    for (let i = 0; i < ACTIVE_BITS_PER_SECTION; i++) {
+      sections[s][i] ^= getMaskBit(s, i);
+    }
+  }
   return sections;
 }
 
@@ -1136,7 +1159,8 @@ function reassembleWithRotation(physicalSections) {
   for (let rot = 0; rot < SECTIONS; rot++) {
     const sections = [0, 1, 2, 3].map(logicalIdx => {
       const p = (logicalIdx + rot) % SECTIONS;
-      return physicalSections[p].reduce((acc, arr) => acc.concat(arr), []);
+      const flat = physicalSections[p].reduce((acc, arr) => acc.concat(arr), []);
+      return flat.map((b, i) => b ^ getMaskBit(logicalIdx, i));
     });
     const first6 = sections[0].slice(0, BITS_PER_SYMBOL);
     const idx = parseInt(first6.join(''), 2);
@@ -1154,7 +1178,10 @@ function reassembleWithRotation(physicalSections) {
   // поворот правильний насправді (можливо лише як рідкісний випадковий
   // збіг, ~1/32 шансу на кожен "не той" поворот). В обох випадках кадр
   // НЕ приймається — замість тихого вибору першого-ліпшого повороту.
-  const sections0 = [0, 1, 2, 3].map(logicalIdx => physicalSections[logicalIdx].reduce((acc, arr) => acc.concat(arr), []));
+  const sections0 = [0, 1, 2, 3].map(logicalIdx => {
+    const flat = physicalSections[logicalIdx].reduce((acc, arr) => acc.concat(arr), []);
+    return flat.map((b, i) => b ^ getMaskBit(logicalIdx, i));
+  });
   return { sections: sections0, rot: 0, startOk: false, ambiguous: matches.length > 1, lang: 'uk' };
 }
 
